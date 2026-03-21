@@ -21,6 +21,11 @@ stats-overlayed-footage/
   code/       <- scripts
 ```
 
+### What CSV file do I use?
+
+On powerline, select a piece like normal. Then, you can left click on that piece in the session manager on the left, and click 'export profile data'. 
+Then, it will copy the data to your clipboard. Paste it into a CSV file (google sheets is fine), save the CSV, then place it in the `data` folder.
+
 ### Usage
 
 **Interactive mode** (prompts you for everything):
