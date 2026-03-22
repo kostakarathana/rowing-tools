@@ -6,3 +6,6 @@
 
 # Ignore all CSV files
 *.csv
+
+# Ignore all PDFs
+*.pdf

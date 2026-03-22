@@ -196,8 +196,14 @@ def render_frames(strokes, frames_dir, metric):
         durations.append(dur)
 
     seat_colors = [
-        "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71",
-        "#1abc9c", "#3498db", "#9b59b6", "#e91e63",
+        "#00e640",  # 1 - bright green
+        "#e60000",  # 2 - red
+        "#00008b",  # 3 - dark blue
+        "#000000",  # 4 - black
+        "#006400",  # 5 - dark green
+        "#800000",  # 6 - maroon
+        "#5b9bd5",  # 7 - lighter blue
+        "#ff8c00",  # 8 - orange
     ]
 
     fig, axes = plt.subplots(1, n_seats, figsize=(10, 2), dpi=100)
