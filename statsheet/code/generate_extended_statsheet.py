@@ -420,7 +420,7 @@ def _draw_crew_timing_page(fig, strokes):
     fig.text(0.5, 0.97, "Crew Timing Sync — Drive Start Offset",
              fontsize=16, fontweight="bold", ha="center", family="sans-serif")
     fig.text(0.5, 0.935,
-             "Each seat's Drive Start T minus crew average  |  0 = perfectly in sync",
+             "Each seat's Drive Start T minus crew average (ms)  |  0 = perfectly in sync",
              fontsize=10, ha="center", color="#555", family="sans-serif")
 
     dead = strokes.get("dead_seats", set())
@@ -472,7 +472,7 @@ def _draw_crew_timing_page(fig, strokes):
         ax.set_ylim(-margin, margin)
         direction = "late" if avg_off > 0 else "early"
         ax.set_title(
-            f"Seat {seat + 1}   |   avg: {avg_off:+.3f}s ({direction})   std: {std_off:.3f}s",
+            f"Seat {seat + 1}   |   avg: {avg_off:+.1f}ms ({direction})   std: {std_off:.1f}ms",
             fontsize=8, fontweight="bold", color=SEAT_COLORS[seat])
         ax.tick_params(labelsize=6)
         ax.grid(alpha=0.2)
@@ -754,133 +754,6 @@ def _draw_consistency_page(fig, strokes, overall_length, effective_length):
     ax2.grid(axis="y", alpha=0.2)
     ax2.spines["top"].set_visible(False)
     ax2.spines["right"].set_visible(False)
-
-
-# ---------------------------------------------------------------------------
-# NEW PAGE: Force Curve & Angle-at-Max-Force
-# ---------------------------------------------------------------------------
-
-def _draw_force_curve_page(fig, strokes):
-    """Reconstruct approximate force curves from Work PC Q1-Q4, Max Force PC,
-    Angle Max F, and Angle 0.7 F.
-
-    For each seat we build a 4-segment bar showing the work distribution
-    across drive quarters, overlay the peak force point and 70% force angle,
-    and show a scatter of Angle-at-Max-Force vs Max Force.
-    """
-    dead = strokes.get("dead_seats", set())
-    live_seats = [s for s in range(8) if s not in dead]
-
-    q1 = np.nanmean(strokes["Work PC Q1"], axis=0)  # (8,)
-    q2 = np.nanmean(strokes["Work PC Q2"], axis=0)
-    q3 = np.nanmean(strokes["Work PC Q3"], axis=0)
-    q4 = np.nanmean(strokes["Work PC Q4"], axis=0)
-    max_f = np.nanmean(strokes["Max Force PC"], axis=0)
-    angle_max = np.nanmean(strokes["Angle Max F"], axis=0)
-    angle_07 = np.nanmean(strokes["Angle 0.7 F"], axis=0)
-    min_angle = np.nanmean(strokes["MinAngle"], axis=0)
-    max_angle = np.nanmean(strokes["MaxAngle"], axis=0)
-
-    # --- TOP HALF: Force profile per seat (stacked horizontal bars) ---
-    fig.text(0.5, 0.97, "Force Profile & Angle at Peak Force",
-             fontsize=16, fontweight="bold", ha="center", family="sans-serif")
-    fig.text(0.5, 0.935,
-             "Work distribution across drive quarters (Q1-Q4%)  |  "
-             "Diamond = peak force position in arc",
-             fontsize=10, ha="center", color="#555", family="sans-serif")
-
-    ax_top = fig.add_axes([0.08, 0.10, 0.84, 0.78])
-
-    quarter_colors = ["#3498db", "#2ecc71", "#f39c12", "#e74c3c"]
-    quarter_labels = ["Q1 (front)", "Q2", "Q3", "Q4 (back)"]
-    n_seats = 8
-    y_pos = np.arange(n_seats)
-    bar_h = 0.55
-
-    for i in range(n_seats):
-        if i in dead:
-            ax_top.text(50, y_pos[i], "N/A", ha="center", va="center",
-                        fontsize=10, color="#ccc")
-            continue
-
-        quarters = [q1[i], q2[i], q3[i], q4[i]]
-        left = 0.0
-        for qi, (qval, qcol) in enumerate(zip(quarters, quarter_colors)):
-            ax_top.barh(y_pos[i], qval, left=left, height=bar_h,
-                        color=qcol, edgecolor="white", linewidth=0.5, alpha=0.85)
-            if qval > 5:  # label if wide enough
-                ax_top.text(left + qval / 2, y_pos[i], f"{qval:.0f}%",
-                            ha="center", va="center", fontsize=7,
-                            color="white", fontweight="bold")
-            left += qval
-
-        # Mark where peak force occurs as a fraction of the drive
-        # Angle Max F is where peak force happens; map it relative to arc
-        arc_range = max_angle[i] - min_angle[i]
-        if arc_range > 0:
-            frac = (angle_max[i] - min_angle[i]) / arc_range * 100
-            ax_top.plot(frac, y_pos[i], marker="D", color=SEAT_COLORS[i],
-                        markersize=8, markeredgecolor="white", markeredgewidth=1.2,
-                        zorder=5)
-
-    ax_top.set_yticks(y_pos)
-    ax_top.set_yticklabels([f"Seat {i+1}" for i in range(n_seats)], fontsize=9)
-    ax_top.set_xlabel("% of Drive (by work)", fontsize=9)
-    ax_top.set_xlim(0, 100)
-    ax_top.invert_yaxis()
-    ax_top.grid(axis="x", alpha=0.2)
-    ax_top.tick_params(labelsize=8)
-
-    # Legend for quarters
-    from matplotlib.patches import Patch
-    legend_elements = [Patch(facecolor=c, label=l)
-                       for c, l in zip(quarter_colors, quarter_labels)]
-    legend_elements.append(plt.Line2D([0], [0], marker="D", color="w",
-                           markerfacecolor="#555", markersize=7,
-                           label="Peak force position"))
-    ax_top.legend(handles=legend_elements, loc="lower right", fontsize=7,
-                  framealpha=0.9, ncol=3)
-
-    # --- Summary table below the bars ---
-    ax_tbl = fig.add_axes([0.25, 0.02, 0.50, 0.08])
-    ax_tbl.axis("off")
-
-    tbl_cols = ["Seat", "Angle\nMax F", "Angle\n0.7F", "Max F\n%"]
-    tbl_data = []
-    for seat in range(n_seats):
-        if seat in dead:
-            tbl_data.append([f"S{seat+1}", "--", "--", "--"])
-        else:
-            tbl_data.append([
-                f"S{seat+1}",
-                f"{angle_max[seat]:.1f}°",
-                f"{angle_07[seat]:.1f}°",
-                f"{max_f[seat]:.1f}%",
-            ])
-
-    table = ax_tbl.table(cellText=tbl_data, colLabels=tbl_cols,
-                         loc="center", cellLoc="center")
-    table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table.scale(1, 1.8)
-
-    for j in range(len(tbl_cols)):
-        table[0, j].set_facecolor("#2c3e50")
-        table[0, j].set_text_props(color="white", fontweight="bold", fontsize=7)
-
-    for i in range(n_seats):
-        if i in dead:
-            for j in range(len(tbl_cols)):
-                table[i + 1, j].set_facecolor("#d5d5d5")
-                table[i + 1, j].set_text_props(color="#999")
-        else:
-            table[i + 1, 0].set_facecolor("#ecf0f1")
-            table[i + 1, 0].set_text_props(fontweight="bold", color=SEAT_COLORS[i])
-            # Color Angle Max F — closer to midpoint of arc is better (subjective)
-            # Color Max Force — higher is better
-            all_max_f = np.array([max_f[s] for s in live_seats])
-            color = _cell_color(max_f[i], all_max_f, higher_is_better=True)
-            table[i + 1, 3].set_facecolor(color)
 
 
 # ---------------------------------------------------------------------------
@@ -1198,15 +1071,6 @@ def generate_pdf(strokes, output_path, session_name):
         pdf.savefig(fig)
         plt.close(fig)
         print(f"  Page {page_num}: Composite Consistency Score")
-        page_num += 1
-
-        # Force Curve & Angle-at-Max-Force
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_force_curve_page(fig, strokes)
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: Force Curve & Angle-at-Max-Force")
         page_num += 1
 
         # Power Efficiency
