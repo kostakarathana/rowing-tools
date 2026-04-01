@@ -1135,20 +1135,8 @@ def interactive_mode():
     return csv_path
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Generate extended PDF statsheet from rowing data")
-    parser.add_argument("--csv", help="CSV data file (name or path)")
-    args = parser.parse_args()
-
-    if not args.csv:
-        csv_path = interactive_mode()
-    else:
-        csv_input = Path(args.csv)
-        csv_path = csv_input if csv_input.exists() else DATA_DIR / args.csv
-        if not csv_path.exists():
-            sys.exit(f"CSV not found: {csv_path}")
-
+def _process_one(csv_path):
+    """Parse a single CSV and generate its extended statsheet PDF."""
     session_name = csv_path.stem
     print(f"\nParsing {csv_path.name}...")
     strokes = parse_csv(csv_path)
@@ -1160,6 +1148,35 @@ def main():
 
     print("Generating extended PDF...")
     generate_pdf(strokes, output_path, session_name)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate extended PDF statsheet from rowing data")
+    parser.add_argument("--csv", help="CSV data file (name or path)")
+    parser.add_argument("--all", action="store_true",
+                        help="Process all CSV files in the data directory")
+    args = parser.parse_args()
+
+    if args.all:
+        csvs = sorted(DATA_DIR.glob("*.csv"))
+        if not csvs:
+            sys.exit(f"No CSV files found in {DATA_DIR}")
+        print(f"Processing {len(csvs)} CSV files...")
+        for csv_path in csvs:
+            _process_one(csv_path)
+        print(f"\nDone — generated {len(csvs)} extended statsheets.")
+        return
+
+    if not args.csv:
+        csv_path = interactive_mode()
+    else:
+        csv_input = Path(args.csv)
+        csv_path = csv_input if csv_input.exists() else DATA_DIR / args.csv
+        if not csv_path.exists():
+            sys.exit(f"CSV not found: {csv_path}")
+
+    _process_one(csv_path)
 
 
 if __name__ == "__main__":
