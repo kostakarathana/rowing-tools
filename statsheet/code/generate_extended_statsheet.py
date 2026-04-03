@@ -554,38 +554,57 @@ def _draw_drive_recovery_page(fig, strokes):
 # NEW PAGE: Seat Correlation Heatmap
 # ---------------------------------------------------------------------------
 
-def _draw_correlation_page(fig, strokes):
-    """Pearson correlation matrix of SwivelPower between all seat pairs."""
-    fig.text(0.5, 0.97, "Seat Power Correlation Heatmap",
-             fontsize=16, fontweight="bold", ha="center", family="sans-serif")
-    fig.text(0.5, 0.935,
-             "Pearson r of SwivelPower between each seat pair  |  "
-             "1.0 = perfectly correlated",
-             fontsize=10, ha="center", color="#555", family="sans-serif")
-
-    dead = strokes.get("dead_seats", set())
-    power = strokes["SwivelPower"]  # (n_strokes, 8)
+def _compute_corr_matrix(data, dead):
+    """Compute 8x8 Pearson correlation matrix between seats for a metric."""
     n_seats = 8
-
-    # Compute correlation matrix (NaN-aware)
     corr = np.full((n_seats, n_seats), np.nan)
     for i in range(n_seats):
         for j in range(n_seats):
             if i in dead or j in dead:
                 continue
-            a, b = power[:, i], power[:, j]
+            a, b = data[:, i], data[:, j]
             valid = ~(np.isnan(a) | np.isnan(b))
             if valid.sum() < 3:
                 continue
             corr[i, j] = np.corrcoef(a[valid], b[valid])[0, 1]
+    return corr
+
+
+def _draw_correlation_page(fig, strokes, metric_key=None, metric_label=None,
+                           data=None, corr_matrix=None):
+    """Pearson correlation matrix of a metric between all seat pairs.
+
+    Can be called with:
+      - metric_key (looks up strokes[metric_key]) OR
+      - data (raw ndarray) OR
+      - corr_matrix (pre-computed 8x8 matrix, used for the combined page)
+    """
+    if metric_label is None:
+        metric_label = metric_key or "Combined"
+
+    title = f"Seat Correlation — {metric_label}"
+    fig.text(0.5, 0.97, title,
+             fontsize=16, fontweight="bold", ha="center", family="sans-serif")
+    fig.text(0.5, 0.935,
+             f"Pearson r of {metric_label} between each seat pair  |  "
+             "1.0 = perfectly correlated",
+             fontsize=10, ha="center", color="#555", family="sans-serif")
+
+    dead = strokes.get("dead_seats", set())
+    n_seats = 8
+
+    if corr_matrix is not None:
+        corr = corr_matrix
+    else:
+        if data is None:
+            data = strokes[metric_key]
+        corr = _compute_corr_matrix(data, dead)
 
     ax = fig.add_axes([0.15, 0.10, 0.65, 0.75])
 
-    # Custom diverging colormap: blue (low) -> white (mid) -> dark green (high)
     cmap = LinearSegmentedColormap.from_list(
         "corr", ["#3498db", "#ecf0f1", "#27ae60"])
 
-    # Mask NaN for display
     masked = np.ma.masked_invalid(corr)
     im = ax.imshow(masked, cmap=cmap, vmin=0, vmax=1, aspect="equal")
 
@@ -595,7 +614,6 @@ def _draw_correlation_page(fig, strokes):
     ax.set_xticklabels(labels, fontsize=9, rotation=45, ha="right")
     ax.set_yticklabels(labels, fontsize=9)
 
-    # Annotate each cell
     for i in range(n_seats):
         for j in range(n_seats):
             val = corr[i, j]
@@ -951,6 +969,316 @@ def _draw_radar_page(fig, strokes, effective_length):
 
 
 # ---------------------------------------------------------------------------
+# NEW PAGE: Work Distribution Profile
+# ---------------------------------------------------------------------------
+
+def _draw_work_distribution_page(fig, strokes):
+    """Stacked bar chart of Work PC Q1–Q4 per seat showing force curve shape."""
+    fig.text(0.5, 0.97, "Work Distribution Profile",
+             fontsize=16, fontweight="bold", ha="center", family="sans-serif")
+    fig.text(0.5, 0.935,
+             "Force curve shape: Q1 (catch) → Q4 (finish)  |  "
+             "Ideal ≈ even or front-loaded",
+             fontsize=10, ha="center", color="#555", family="sans-serif")
+
+    dead = strokes.get("dead_seats", set())
+
+    q_keys = ["Work PC Q1", "Work PC Q2", "Work PC Q3", "Work PC Q4"]
+    q_labels = ["Q1 (catch)", "Q2", "Q3", "Q4 (finish)"]
+    q_colors = ["#2ecc71", "#3498db", "#f39c12", "#e74c3c"]
+
+    avgs = {}
+    for k in q_keys:
+        avgs[k] = np.array([np.nanmean(strokes[k][:, s]) if s not in dead else 0
+                            for s in range(8)])
+
+    ax = fig.add_axes([0.08, 0.10, 0.84, 0.78])
+
+    x = np.arange(8)
+    bottoms = np.zeros(8)
+
+    for k, label, color in zip(q_keys, q_labels, q_colors):
+        vals = avgs[k]
+        bars = ax.bar(x, vals, bottom=bottoms, color=color, edgecolor="white",
+                       linewidth=0.5, label=label, width=0.65)
+        # Annotate inside each segment
+        for i, (v, b) in enumerate(zip(vals, bottoms)):
+            if i in dead or v < 1:
+                continue
+            ax.text(i, b + v / 2, f"{v:.1f}%", ha="center", va="center",
+                    fontsize=8, fontweight="bold", color="white")
+        bottoms += vals
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"Seat {s+1}" for s in range(8)], fontsize=10)
+    ax.set_ylabel("Cumulative Work %", fontsize=11)
+    ax.set_ylim(0, max(bottoms) * 1.08)
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+
+    for s in dead:
+        ax.text(s, 2, "NO DATA", ha="center", va="bottom", fontsize=8,
+                color="#bbb", fontweight="bold")
+
+
+# ---------------------------------------------------------------------------
+# NEW PAGE: Force Application Window
+# ---------------------------------------------------------------------------
+
+def _draw_force_application_page(fig, strokes):
+    """Horizontal range bars: Angle at Max Force and Angle at 0.7F per seat.
+
+    Shows where in the arc each rower applies peak force.
+    """
+    fig.text(0.5, 0.97, "Force Application Window",
+             fontsize=16, fontweight="bold", ha="center", family="sans-serif")
+    fig.text(0.5, 0.935,
+             "Where in the arc each seat applies peak force  |  "
+             "Diamond = Angle at Max Force, Bar = 0.7× Force zone",
+             fontsize=10, ha="center", color="#555", family="sans-serif")
+
+    dead = strokes.get("dead_seats", set())
+
+    angle_max_f = strokes["Angle Max F"]   # (n, 8)
+    angle_07f = strokes["Angle 0.7 F"]     # (n, 8)
+
+    ax = fig.add_axes([0.12, 0.08, 0.80, 0.82])
+
+    y_positions = np.arange(8)
+
+    for seat in range(8):
+        if seat in dead:
+            ax.text(0, seat, "NO DATA", ha="center", va="center",
+                    fontsize=9, color="#bbb", fontweight="bold")
+            continue
+
+        max_f_avg = np.nanmean(angle_max_f[:, seat])
+        max_f_std = np.nanstd(angle_max_f[:, seat])
+        f07_avg = np.nanmean(angle_07f[:, seat])
+        f07_std = np.nanstd(angle_07f[:, seat])
+
+        # The 0.7F zone spans from the earlier angle to the later one
+        left = min(max_f_avg, f07_avg)
+        right = max(max_f_avg, f07_avg)
+        width = right - left
+
+        # Draw the 0.7F zone bar
+        ax.barh(seat, width, left=left, height=0.5,
+                color=SEAT_COLORS[seat], alpha=0.35, edgecolor=SEAT_COLORS[seat],
+                linewidth=1.2)
+
+        # Error bars for variability
+        ax.errorbar(f07_avg, seat, xerr=f07_std, fmt="o", color=SEAT_COLORS[seat],
+                     markersize=5, capsize=4, capthick=1, alpha=0.6)
+
+        # Diamond for angle at max force
+        ax.scatter(max_f_avg, seat, marker="D", s=80, color=SEAT_COLORS[seat],
+                   zorder=5, edgecolors="white", linewidths=0.8)
+
+        # Annotate
+        ax.text(right + 0.8, seat, f"MaxF: {max_f_avg:.1f}°  0.7F: {f07_avg:.1f}°",
+                va="center", fontsize=8, color=SEAT_COLORS[seat])
+
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels([f"Seat {s+1}" for s in range(8)], fontsize=10)
+    ax.set_xlabel("Angle (degrees)", fontsize=11)
+    ax.invert_yaxis()
+    ax.grid(axis="x", alpha=0.3)
+    ax.axvline(0, color="#ccc", linewidth=0.8, linestyle="--")
+
+
+# ---------------------------------------------------------------------------
+# NEW PAGE: Rate Response Curves
+# ---------------------------------------------------------------------------
+
+def _draw_rate_response_page(fig, strokes, effective_length):
+    """Scatter of rating vs power and effective length with per-seat trend lines."""
+    fig.text(0.5, 0.97, "Rate Response Curves",
+             fontsize=16, fontweight="bold", ha="center", family="sans-serif")
+    fig.text(0.5, 0.935,
+             "How each seat responds to rate changes  |  "
+             "Steeper slope = better rate response",
+             fontsize=10, ha="center", color="#555", family="sans-serif")
+
+    dead = strokes.get("dead_seats", set())
+    rating = np.array(strokes["rating"])
+
+    gs = fig.add_gridspec(1, 2, hspace=0.3, wspace=0.25,
+                          left=0.07, right=0.95, top=0.89, bottom=0.10)
+
+    panels = [
+        ("SwivelPower", "Power (watts)", strokes["SwivelPower"]),
+        ("Eff. Length", "Effective Length (deg)", effective_length),
+    ]
+
+    for idx, (name, ylabel, data) in enumerate(panels):
+        ax = fig.add_subplot(gs[0, idx])
+        ax.set_xlabel("Rating (spm)", fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(name, fontsize=12, fontweight="bold")
+        ax.grid(alpha=0.2)
+
+        for seat in range(8):
+            if seat in dead:
+                continue
+
+            y = data[:, seat]
+            valid = ~np.isnan(y) & ~np.isnan(rating) & (rating > 0)
+            if valid.sum() < 5:
+                continue
+
+            r_valid = rating[valid]
+            y_valid = y[valid]
+
+            ax.scatter(r_valid, y_valid, color=SEAT_COLORS[seat], alpha=0.12,
+                       s=10, rasterized=True)
+
+            # Linear trend line
+            coeffs = np.polyfit(r_valid, y_valid, 1)
+            r_range = np.linspace(r_valid.min(), r_valid.max(), 50)
+            ax.plot(r_range, np.polyval(coeffs, r_range),
+                    color=SEAT_COLORS[seat], linewidth=2,
+                    label=f"S{seat+1} ({coeffs[0]:+.1f}/spm)")
+
+        ax.legend(fontsize=7, loc="best", ncol=2)
+
+
+# ---------------------------------------------------------------------------
+# NEW PAGE: Rolling Power Dashboard
+# ---------------------------------------------------------------------------
+
+def _draw_rolling_power_page(fig, strokes, effective_length):
+    """10-stroke rolling average of power, effective length, and catch slip."""
+    fig.text(0.5, 0.97, "Rolling Power Dashboard",
+             fontsize=16, fontweight="bold", ha="center", family="sans-serif")
+    fig.text(0.5, 0.935,
+             "10-stroke rolling average  |  Tracks drift and fatigue in real time",
+             fontsize=10, ha="center", color="#555", family="sans-serif")
+
+    dead = strokes.get("dead_seats", set())
+    stroke_nums = np.array(strokes["stroke_num"])
+    window = 10
+
+    def rolling_avg(arr, w):
+        """Simple rolling mean, NaN-aware."""
+        out = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            start = max(0, i - w + 1)
+            chunk = arr[start:i + 1]
+            valid = ~np.isnan(chunk)
+            if valid.sum() > 0:
+                out[i] = np.nanmean(chunk)
+        return out
+
+    panels = [
+        ("Power (watts)", strokes["SwivelPower"]),
+        ("Effective Length (deg)", effective_length),
+        ("Catch Slip (deg)", strokes["CatchSlip"]),
+    ]
+
+    gs = fig.add_gridspec(3, 1, hspace=0.35,
+                          left=0.07, right=0.92, top=0.89, bottom=0.06)
+
+    for idx, (ylabel, data) in enumerate(panels):
+        ax = fig.add_subplot(gs[idx, 0])
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.grid(alpha=0.2)
+
+        if idx == 2:
+            ax.set_xlabel("Stroke #", fontsize=9)
+
+        for seat in range(8):
+            if seat in dead:
+                continue
+            y = rolling_avg(data[:, seat], window)
+            ax.plot(stroke_nums, y, color=SEAT_COLORS[seat], linewidth=1.2,
+                    alpha=0.8, label=f"S{seat+1}")
+
+        if idx == 0:
+            ax.legend(fontsize=6, loc="upper right", ncol=8,
+                      framealpha=0.7, handlelength=1)
+
+
+# ---------------------------------------------------------------------------
+# NEW PAGE: Power Quartile Fingerprint
+# ---------------------------------------------------------------------------
+
+def _draw_quartile_fingerprint_page(fig, strokes):
+    """Radar/polar chart of Q1–Q4 work distribution per seat.
+
+    Each seat gets a 4-spoke radar showing the shape of their force curve.
+    """
+    fig.text(0.5, 0.97, "Power Quartile Fingerprint",
+             fontsize=16, fontweight="bold", ha="center", family="sans-serif")
+    fig.text(0.5, 0.935,
+             "Force curve shape per seat  |  Q1 (catch) → Q4 (finish)  |  "
+             "Even = circular, Front-loaded = top-heavy",
+             fontsize=10, ha="center", color="#555", family="sans-serif")
+
+    dead = strokes.get("dead_seats", set())
+    q_keys = ["Work PC Q1", "Work PC Q2", "Work PC Q3", "Work PC Q4"]
+    q_labels = ["Q1\n(catch)", "Q2", "Q3", "Q4\n(finish)"]
+
+    # Compute per-seat averages
+    avgs = np.zeros((8, 4))
+    for seat in range(8):
+        if seat in dead:
+            continue
+        for qi, k in enumerate(q_keys):
+            avgs[seat, qi] = np.nanmean(strokes[k][:, seat])
+
+    # Normalise: find global min/max across all live seats for radar scaling
+    live_vals = avgs[[s for s in range(8) if s not in dead], :]
+    vmin = np.nanmin(live_vals)
+    vmax = np.nanmax(live_vals)
+    if vmax == vmin:
+        vmax = vmin + 1
+
+    n_cat = 4
+    angles = np.linspace(0, 2 * np.pi, n_cat, endpoint=False).tolist()
+    angles += angles[:1]
+
+    gs = fig.add_gridspec(2, 4, hspace=0.35, wspace=0.25,
+                          left=0.04, right=0.96, top=0.89, bottom=0.04)
+
+    for seat in range(8):
+        row, col = divmod(seat, 4)
+        ax = fig.add_subplot(gs[row, col], polar=True)
+
+        if seat in dead:
+            ax.set_title(f"Seat {seat+1}", fontsize=9, fontweight="bold",
+                         color="#ccc", pad=10)
+            ax.set_yticklabels([])
+            ax.set_xticklabels([])
+            continue
+
+        # Normalise to 0-1 for display
+        vals_raw = avgs[seat, :]
+        vals_norm = (vals_raw - vmin) / (vmax - vmin)
+        vals_plot = vals_norm.tolist() + [vals_norm[0]]
+
+        ax.fill(angles, vals_plot, color=SEAT_COLORS[seat], alpha=0.2)
+        ax.plot(angles, vals_plot, color=SEAT_COLORS[seat], linewidth=1.8)
+        ax.scatter(angles[:-1], vals_plot[:-1], color=SEAT_COLORS[seat],
+                   s=25, zorder=5)
+
+        # Annotate with raw values
+        for a, v_raw, v_plot in zip(angles[:-1], vals_raw, vals_plot[:-1]):
+            ax.annotate(f"{v_raw:.1f}%", xy=(a, v_plot),
+                        xytext=(5, 5), textcoords="offset points",
+                        fontsize=6, color=SEAT_COLORS[seat], fontweight="bold")
+
+        ax.set_xticks(angles[:-1])
+        ax.set_xticklabels(q_labels, fontsize=7)
+        ax.set_ylim(0, 1.1)
+        ax.set_yticks([0.25, 0.5, 0.75, 1.0])
+        ax.set_yticklabels(["", "", "", ""], fontsize=5)
+        ax.set_title(f"Seat {seat+1}", fontsize=10, fontweight="bold",
+                     color=SEAT_COLORS[seat], pad=12)
+        ax.grid(alpha=0.3)
+
+
+# ---------------------------------------------------------------------------
 # PDF generation
 # ---------------------------------------------------------------------------
 
@@ -1055,13 +1383,69 @@ def generate_pdf(strokes, output_path, session_name):
         print(f"  Page {page_num}: Drive:Recovery Ratio")
         page_num += 1
 
-        # Seat Correlation Heatmap
+        # ---------------------------------------------------------------
+        # Breaker page: Correlation Heatmaps
+        # ---------------------------------------------------------------
         fig = plt.figure(figsize=(16.5, 11.7))
         fig.patch.set_facecolor("white")
-        _draw_correlation_page(fig, strokes)
+        fig.text(0.5, 0.5, "Correlation Heatmaps", fontsize=36,
+                 fontweight="bold", ha="center", va="center",
+                 color="#2c3e50", family="sans-serif")
         pdf.savefig(fig)
         plt.close(fig)
-        print(f"  Page {page_num}: Seat Correlation Heatmap")
+        print(f"  Page {page_num}: --- Correlation Heatmaps ---")
+        page_num += 1
+
+        # Per-metric correlation pages
+        corr_metrics = [
+            ("SwivelPower", "Swivel Power (watts)", None),
+            ("MinAngle", "Min Angle (deg)", None),
+            ("MaxAngle", "Max Angle (deg)", None),
+            ("CatchSlip", "Catch Slip (deg)", None),
+            ("FinishSlip", "Finish Slip (deg)", None),
+            ("Drive Start T", "Drive Start T (ms)", None),
+            ("Rower Swivel Power", "Rower Swivel Power", None),
+            ("Drive Time", "Drive Time (s)", None),
+            ("Recovery Time", "Recovery Time (s)", None),
+            ("Angle Max F", "Angle at Max Force (deg)", None),
+            ("Angle 0.7 F", "Angle at 0.7× Force (deg)", None),
+            ("Work PC Q1", "Work PC Q1 (%)", None),
+            ("Work PC Q2", "Work PC Q2 (%)", None),
+            ("Work PC Q3", "Work PC Q3 (%)", None),
+            ("Work PC Q4", "Work PC Q4 (%)", None),
+            ("Max Force PC", "Max Force PC (%)", None),
+            (None, "Overall Length (deg)", overall_length),
+            (None, "Effective Length (deg)", effective_length),
+        ]
+
+        dead = strokes.get("dead_seats", set())
+        all_corr_matrices = []
+
+        for metric_key, label, derived_data in corr_metrics:
+            fig = plt.figure(figsize=(16.5, 11.7))
+            fig.patch.set_facecolor("white")
+            d = derived_data if derived_data is not None else strokes[metric_key]
+            corr_mat = _compute_corr_matrix(d, dead)
+            all_corr_matrices.append(corr_mat)
+            _draw_correlation_page(fig, strokes, metric_label=label,
+                                   corr_matrix=corr_mat)
+            pdf.savefig(fig)
+            plt.close(fig)
+            print(f"  Page {page_num}: Correlation — {label}")
+            page_num += 1
+
+        # Combined correlation heatmap (average of all per-metric matrices)
+        stacked = np.stack(all_corr_matrices, axis=0)
+        combined_corr = np.nanmean(stacked, axis=0)
+
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_correlation_page(fig, strokes,
+                               metric_label="Combined (avg across all metrics)",
+                               corr_matrix=combined_corr)
+        pdf.savefig(fig)
+        plt.close(fig)
+        print(f"  Page {page_num}: Correlation — Combined")
         page_num += 1
 
         # Composite Consistency Score
@@ -1098,6 +1482,51 @@ def generate_pdf(strokes, output_path, session_name):
         pdf.savefig(fig)
         plt.close(fig)
         print(f"  Page {page_num}: Technique Radar")
+        page_num += 1
+
+        # Work Distribution Profile
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_work_distribution_page(fig, strokes)
+        pdf.savefig(fig)
+        plt.close(fig)
+        print(f"  Page {page_num}: Work Distribution Profile")
+        page_num += 1
+
+        # Force Application Window
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_force_application_page(fig, strokes)
+        pdf.savefig(fig)
+        plt.close(fig)
+        print(f"  Page {page_num}: Force Application Window")
+        page_num += 1
+
+        # Rate Response Curves
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_rate_response_page(fig, strokes, effective_length)
+        pdf.savefig(fig)
+        plt.close(fig)
+        print(f"  Page {page_num}: Rate Response Curves")
+        page_num += 1
+
+        # Rolling Power Dashboard
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_rolling_power_page(fig, strokes, effective_length)
+        pdf.savefig(fig)
+        plt.close(fig)
+        print(f"  Page {page_num}: Rolling Power Dashboard")
+        page_num += 1
+
+        # Power Quartile Fingerprint
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_quartile_fingerprint_page(fig, strokes)
+        pdf.savefig(fig)
+        plt.close(fig)
+        print(f"  Page {page_num}: Power Quartile Fingerprint")
         page_num += 1
 
     print(f"\nPDF saved to {output_path}")
