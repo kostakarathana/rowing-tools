@@ -414,6 +414,191 @@ def _draw_metric_page(fig, data, title, strokes, higher_is_better):
             ax.set_xlabel("Stroke", fontsize=7)
 
 
+def _detect_anomalies(strokes, overall_length, effective_length):
+    """Scan session data for negative anomalies a coach should know about.
+
+    Returns a list of (severity, seat_label, description) tuples sorted by severity.
+    severity: 'HIGH', 'MED', or 'LOW'.
+    """
+    anomalies = []
+    dead = strokes.get("dead_seats", set())
+    live_seats = [s for s in range(8) if s not in dead]
+    if len(live_seats) < 2:
+        return anomalies
+
+    # --- Helper ---
+    def _add(severity, seat, desc):
+        label = f"Seat {seat + 1}" if seat is not None else "Crew"
+        anomalies.append((severity, label, desc))
+
+    # 1. High variance: seat std > 1.8× crew-average std for key metrics
+    variance_checks = [
+        ("Avg Watts", strokes["SwivelPower"]),
+        ("Effective Length", effective_length),
+        ("Catch Slip", strokes["CatchSlip"]),
+        ("Finish Slip", strokes["FinishSlip"]),
+    ]
+    for name, data in variance_checks:
+        stds = np.array([np.nanstd(data[:, s]) for s in range(8)])
+        crew_avg_std = np.nanmean(stds[live_seats])
+        for s in live_seats:
+            if crew_avg_std > 0 and stds[s] > 1.8 * crew_avg_std:
+                ratio = stds[s] / crew_avg_std
+                _add("HIGH", s,
+                     f"{name} variance is {ratio:.1f}× the crew average "
+                     f"(std {stds[s]:.1f} vs crew avg std {crew_avg_std:.1f})")
+
+    # 2. Power fade: last-quarter avg power < first-quarter by >12%
+    power = strokes["SwivelPower"]
+    n = power.shape[0]
+    q1_end = n // 4
+    q4_start = n - n // 4
+    if q1_end > 2 and (n - q4_start) > 2:
+        for s in live_seats:
+            first_q = np.nanmean(power[:q1_end, s])
+            last_q = np.nanmean(power[q4_start:, s])
+            if first_q > 0:
+                drop_pct = (first_q - last_q) / first_q * 100
+                if drop_pct > 12:
+                    sev = "HIGH" if drop_pct > 20 else "MED"
+                    _add(sev, s,
+                         f"Power faded {drop_pct:.0f}% from first to last quarter "
+                         f"({first_q:.0f}W → {last_q:.0f}W)")
+
+    # 3. Excessive slip: seat avg catch/finish slip > 1.5× crew average
+    for slip_name, slip_key in [("Catch Slip", "CatchSlip"),
+                                 ("Finish Slip", "FinishSlip")]:
+        data = strokes[slip_key]
+        avgs = np.array([np.nanmean(data[:, s]) for s in range(8)])
+        crew_avg = np.nanmean(avgs[live_seats])
+        for s in live_seats:
+            if crew_avg > 0 and avgs[s] > 1.5 * crew_avg:
+                _add("MED", s,
+                     f"{slip_name} avg {avgs[s]:.1f}° is {avgs[s]/crew_avg:.1f}× "
+                     f"the crew average ({crew_avg:.1f}°)")
+
+    # 4. Low power outlier: seat avg watts > 1.5 std devs below crew mean
+    power_avgs = np.array([np.nanmean(power[:, s]) for s in range(8)])
+    crew_mean = np.nanmean(power_avgs[live_seats])
+    crew_std = np.nanstd(power_avgs[live_seats])
+    if crew_std > 0:
+        for s in live_seats:
+            z = (power_avgs[s] - crew_mean) / crew_std
+            if z < -1.5:
+                _add("MED", s,
+                     f"Avg power {power_avgs[s]:.0f}W is {abs(z):.1f} std devs "
+                     f"below crew mean ({crew_mean:.0f}W)")
+
+    # 5. Timing consistency: drive start time std much higher than crew avg
+    dst = strokes["Drive Start T"]
+    dst_stds = np.array([np.nanstd(dst[:, s]) for s in range(8)])
+    crew_dst_std = np.nanmean(dst_stds[live_seats])
+    if crew_dst_std > 0:
+        for s in live_seats:
+            if dst_stds[s] > 1.8 * crew_dst_std:
+                _add("MED", s,
+                     f"Timing variability is {dst_stds[s]/crew_dst_std:.1f}× "
+                     f"the crew average (inconsistent catch timing)")
+
+    # 6. Effective length fade
+    if q1_end > 2 and (n - q4_start) > 2:
+        for s in live_seats:
+            first_q = np.nanmean(effective_length[:q1_end, s])
+            last_q = np.nanmean(effective_length[q4_start:, s])
+            if first_q > 0:
+                drop_pct = (first_q - last_q) / first_q * 100
+                if drop_pct > 8:
+                    _add("LOW", s,
+                         f"Effective length shortened {drop_pct:.0f}% from first "
+                         f"to last quarter ({first_q:.1f}° → {last_q:.1f}°)")
+
+    # 7. Drive:Recovery ratio outlier
+    drive = strokes["Drive Time"]
+    recovery = strokes["Recovery Time"]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(recovery > 0, drive / recovery, np.nan)
+    ratio_avgs = np.array([np.nanmean(ratio[:, s]) for s in range(8)])
+    crew_ratio = np.nanmean(ratio_avgs[live_seats])
+    crew_ratio_std = np.nanstd(ratio_avgs[live_seats])
+    if crew_ratio_std > 0:
+        for s in live_seats:
+            z = (ratio_avgs[s] - crew_ratio) / crew_ratio_std
+            if z > 1.5:
+                _add("LOW", s,
+                     f"Drive:Recovery ratio {ratio_avgs[s]:.2f} is high vs "
+                     f"crew avg {crew_ratio:.2f} (rushing the slide)")
+
+    # Sort: HIGH first, then MED, then LOW
+    order = {"HIGH": 0, "MED": 1, "LOW": 2}
+    anomalies.sort(key=lambda x: order[x[0]])
+    return anomalies
+
+
+def _draw_anomaly_page(fig, anomalies, session_name):
+    """Final page: Experimental Anomaly Report — table of flagged issues."""
+    fig.text(0.5, 0.95, f"Experimental Anomaly Report — {session_name}",
+             fontsize=18, fontweight="bold", ha="center", va="top",
+             family="sans-serif", color="#2c3e50")
+    fig.text(0.5, 0.91,
+             "Automatically detected issues that may need attention",
+             fontsize=10, ha="center", va="top", color="#555",
+             family="sans-serif")
+
+    ax = fig.add_axes([0.05, 0.05, 0.9, 0.82])
+    ax.axis("off")
+
+    if not anomalies:
+        fig.text(0.5, 0.5, "No anomalies detected — clean session!",
+                 fontsize=20, ha="center", va="center", color="#2ecc71",
+                 fontweight="bold", family="sans-serif")
+        return
+
+    SEV_COLORS = {
+        "HIGH": "#e74c3c",
+        "MED": "#f39c12",
+        "LOW": "#3498db",
+    }
+    SEV_BG = {
+        "HIGH": (0.98, 0.85, 0.85),
+        "MED": (1.0, 0.95, 0.82),
+        "LOW": (0.87, 0.93, 1.0),
+    }
+
+    col_labels = ["Severity", "Seat", "Issue"]
+    cell_data = [[sev, seat, desc] for sev, seat, desc in anomalies]
+
+    table = ax.table(
+        cellText=cell_data,
+        colLabels=col_labels,
+        loc="upper center",
+        cellLoc="left",
+        colWidths=[0.08, 0.08, 0.84],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.8)
+
+    # Style header
+    for j in range(3):
+        cell = table[0, j]
+        cell.set_facecolor("#2c3e50")
+        cell.set_text_props(color="white", fontweight="bold", fontsize=9)
+
+    # Style rows
+    for i, (sev, seat, desc) in enumerate(anomalies):
+        table[i + 1, 0].set_text_props(fontweight="bold", color=SEV_COLORS[sev])
+        table[i + 1, 0].set_facecolor(SEV_BG[sev])
+        table[i + 1, 1].set_facecolor(SEV_BG[sev])
+        table[i + 1, 1].set_text_props(fontweight="bold")
+        table[i + 1, 2].set_facecolor(SEV_BG[sev])
+
+    # Legend at bottom
+    fig.text(0.05, 0.02,
+             "HIGH = likely hurting boat speed    MED = worth investigating    "
+             "LOW = minor, monitor over time",
+             fontsize=8, color="#777", family="sans-serif")
+
+
 def generate_pdf(strokes, output_path, session_name):
     n_strokes = len(strokes["stroke_num"])
 
@@ -481,6 +666,17 @@ def generate_pdf(strokes, output_path, session_name):
             plt.close(fig)
             print(f"  Page {page_num}: {title}")
             page_num += 1
+
+        # Final page: Experimental Anomaly Report
+        anomalies = _detect_anomalies(strokes, overall_length, effective_length)
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_anomaly_page(fig, anomalies, session_name)
+        pdf.savefig(fig)
+        plt.close(fig)
+        n_anomalies = len(anomalies)
+        print(f"  Page {page_num}: Experimental Anomaly Report ({n_anomalies} issues)")
+        page_num += 1
 
     print(f"\nPDF saved to {output_path}")
 
