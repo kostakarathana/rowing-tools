@@ -9,3 +9,5 @@
 
 # Ignore all PDFs
 *.pdf
+*.txt
+

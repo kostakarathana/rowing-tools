@@ -100,6 +100,16 @@ def parse_csv(csv_path):
 
     strokes = _remove_outliers(strokes, list(metrics.keys()))
     strokes["dead_seats"] = _detect_dead_seats(strokes, list(metrics.keys()))
+
+    # Parse rower names from column N (index 13), rows 0-8
+    seat_names = []
+    for r in range(9):
+        if r < len(rows) and len(rows[r]) > 13 and rows[r][13].strip():
+            seat_names.append(rows[r][13].strip())
+        else:
+            seat_names.append(f"Seat {r + 1}" if r < 8 else "Cox")
+    strokes["seat_names"] = seat_names  # 0-7 = seats, 8 = cox
+
     return strokes
 
 
@@ -154,6 +164,14 @@ def _detect_dead_seats(strokes, metric_names):
     return dead
 
 
+def _seat_label(seat, strokes):
+    """Return the rower name for a seat index, falling back to 'Seat N'."""
+    names = strokes.get("seat_names", [])
+    if seat < len(names):
+        return names[seat]
+    return f"Seat {seat + 1}"
+
+
 def _cell_color(value, all_values, higher_is_better):
     """Return a background color: green for good, red for bad, orange for middle."""
     vmin, vmax = np.nanmin(all_values), np.nanmax(all_values)
@@ -191,7 +209,7 @@ def _draw_summary_table(fig, strokes, overall_length, effective_length, session_
         ("Max Angle", strokes["MaxAngle"], True),
     ]
 
-    col_labels = ["Seat"] + [d[0] for d in metric_defs]
+    col_labels = ["Name"] + [d[0] for d in metric_defs]
     # Add std dev columns
     for d in metric_defs:
         col_labels.append(f"{d[0]} std")
@@ -205,9 +223,9 @@ def _draw_summary_table(fig, strokes, overall_length, effective_length, session_
     cell_data = []
     for seat in range(8):
         if seat in dead:
-            row = [f"Seat {seat + 1}"] + ["--"] * (len(metric_defs) * 2)
+            row = [_seat_label(seat, strokes)] + ["--"] * (len(metric_defs) * 2)
         else:
-            row = [f"Seat {seat + 1}"]
+            row = [_seat_label(seat, strokes)]
             for _, data, _ in metric_defs:
                 row.append(f"{np.nanmean(data[:, seat]):.1f}")
             for _, data, _ in metric_defs:
@@ -343,7 +361,7 @@ def _draw_angle_page(fig, strokes):
                      ecolor="#555", capsize=5, linewidth=1.2)
 
     ax.set_yticks(y)
-    ax.set_yticklabels([f"Seat {i+1}" for i in range(n_seats)], fontsize=10)
+    ax.set_yticklabels([_seat_label(i, strokes) for i in range(n_seats)], fontsize=10)
     ax.set_xlabel("Angle (degrees)", fontsize=11)
     ax.axvline(x=0, color="#aaa", linewidth=0.5, linestyle="--")
     ax.grid(axis="x", alpha=0.2)
@@ -389,7 +407,7 @@ def _draw_metric_page(fig, data, title, strokes, higher_is_better):
         if seat in dead:
             ax.text(0.5, 0.5, "NO DATA", transform=ax.transAxes,
                     ha="center", va="center", fontsize=14, color="#ccc", fontweight="bold")
-            ax.set_title(f"Seat {seat + 1}", fontsize=9, fontweight="bold", color="#ccc")
+            ax.set_title(_seat_label(seat, strokes), fontsize=9, fontweight="bold", color="#ccc")
             ax.tick_params(labelsize=6)
             ax.grid(alpha=0.2)
             continue
@@ -405,7 +423,7 @@ def _draw_metric_page(fig, data, title, strokes, higher_is_better):
                     linestyle=":", alpha=0.6)
 
         ax.set_ylim(global_min, global_max)
-        ax.set_title(f"Seat {seat + 1}   |   avg: {seat_avg:.1f}   std: {seat_std:.1f}",
+        ax.set_title(f"{_seat_label(seat, strokes)}   |   avg: {seat_avg:.1f}   std: {seat_std:.1f}",
                      fontsize=9, fontweight="bold", color=SEAT_COLORS[seat])
         ax.tick_params(labelsize=6)
         ax.grid(alpha=0.2)
@@ -428,7 +446,7 @@ def _detect_anomalies(strokes, overall_length, effective_length):
 
     # --- Helper ---
     def _add(severity, seat, desc):
-        label = f"Seat {seat + 1}" if seat is not None else "Crew"
+        label = _seat_label(seat, strokes) if seat is not None else "Crew"
         anomalies.append((severity, label, desc))
 
     # 1. High variance: seat std > 1.8× crew-average std for key metrics

@@ -107,6 +107,16 @@ def parse_csv(csv_path):
 
     strokes = _remove_outliers(strokes, list(metrics.keys()))
     strokes["dead_seats"] = _detect_dead_seats(strokes, list(metrics.keys()))
+
+    # Parse rower names from column N (index 13), rows 0-8
+    seat_names = []
+    for r in range(9):
+        if r < len(rows) and len(rows[r]) > 13 and rows[r][13].strip():
+            seat_names.append(rows[r][13].strip())
+        else:
+            seat_names.append(f"Seat {r + 1}" if r < 8 else "Cox")
+    strokes["seat_names"] = seat_names  # 0-7 = seats, 8 = cox
+
     return strokes
 
 
@@ -153,6 +163,14 @@ def _detect_dead_seats(strokes, metric_names):
                 strokes[name][:, seat] = np.nan
 
     return dead
+
+
+def _seat_label(seat, strokes):
+    """Return the rower name for a seat index, falling back to 'Seat N'."""
+    names = strokes.get("seat_names", [])
+    if seat < len(names):
+        return names[seat]
+    return f"Seat {seat + 1}"
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +231,7 @@ def _draw_summary_table(fig, strokes, overall_length, effective_length, session_
         ("Max Angle", strokes["MaxAngle"], True),
     ]
 
-    col_labels = ["Seat"] + [d[0] for d in metric_defs]
+    col_labels = ["Name"] + [d[0] for d in metric_defs]
     for d in metric_defs:
         col_labels.append(f"{d[0]} std")
 
@@ -225,9 +243,9 @@ def _draw_summary_table(fig, strokes, overall_length, effective_length, session_
     cell_data = []
     for seat in range(8):
         if seat in dead:
-            row = [f"Seat {seat + 1}"] + ["--"] * (len(metric_defs) * 2)
+            row = [_seat_label(seat, strokes)] + ["--"] * (len(metric_defs) * 2)
         else:
-            row = [f"Seat {seat + 1}"]
+            row = [_seat_label(seat, strokes)]
             for _, data, _ in metric_defs:
                 row.append(f"{np.nanmean(data[:, seat]):.1f}")
             for _, data, _ in metric_defs:
@@ -351,7 +369,7 @@ def _draw_angle_page(fig, strokes):
                      ecolor="#555", capsize=5, linewidth=1.2)
 
     ax.set_yticks(y)
-    ax.set_yticklabels([f"Seat {i+1}" for i in range(n_seats)], fontsize=10)
+    ax.set_yticklabels([_seat_label(i, strokes) for i in range(n_seats)], fontsize=10)
     ax.set_xlabel("Angle (degrees)", fontsize=11)
     ax.axvline(x=0, color="#aaa", linewidth=0.5, linestyle="--")
     ax.grid(axis="x", alpha=0.2)
@@ -382,7 +400,7 @@ def _draw_metric_page(fig, data, title, strokes, higher_is_better):
         if seat in dead:
             ax.text(0.5, 0.5, "NO DATA", transform=ax.transAxes,
                     ha="center", va="center", fontsize=14, color="#ccc", fontweight="bold")
-            ax.set_title(f"Seat {seat + 1}", fontsize=9, fontweight="bold", color="#ccc")
+            ax.set_title(_seat_label(seat, strokes), fontsize=9, fontweight="bold", color="#ccc")
             ax.tick_params(labelsize=6)
             ax.grid(alpha=0.2)
             continue
@@ -398,7 +416,7 @@ def _draw_metric_page(fig, data, title, strokes, higher_is_better):
                     linestyle=":", alpha=0.6)
 
         ax.set_ylim(global_min, global_max)
-        ax.set_title(f"Seat {seat + 1}   |   avg: {seat_avg:.1f}   std: {seat_std:.1f}",
+        ax.set_title(f"{_seat_label(seat, strokes)}   |   avg: {seat_avg:.1f}   std: {seat_std:.1f}",
                      fontsize=9, fontweight="bold", color=SEAT_COLORS[seat])
         ax.tick_params(labelsize=6)
         ax.grid(alpha=0.2)
@@ -449,7 +467,7 @@ def _draw_crew_timing_page(fig, strokes):
         if seat in dead:
             ax.text(0.5, 0.5, "NO DATA", transform=ax.transAxes,
                     ha="center", va="center", fontsize=14, color="#ccc", fontweight="bold")
-            ax.set_title(f"Seat {seat + 1}", fontsize=9, fontweight="bold", color="#ccc")
+            ax.set_title(_seat_label(seat, strokes), fontsize=9, fontweight="bold", color="#ccc")
             ax.tick_params(labelsize=6)
             ax.grid(alpha=0.2)
             continue
@@ -472,7 +490,7 @@ def _draw_crew_timing_page(fig, strokes):
         ax.set_ylim(-margin, margin)
         direction = "late" if avg_off > 0 else "early"
         ax.set_title(
-            f"Seat {seat + 1}   |   avg: {avg_off:+.1f}ms ({direction})   std: {std_off:.1f}ms",
+            f"{_seat_label(seat, strokes)}   |   avg: {avg_off:+.1f}ms ({direction})   std: {std_off:.1f}ms",
             fontsize=8, fontweight="bold", color=SEAT_COLORS[seat])
         ax.tick_params(labelsize=6)
         ax.grid(alpha=0.2)
@@ -522,7 +540,7 @@ def _draw_drive_recovery_page(fig, strokes):
         if seat in dead:
             ax.text(0.5, 0.5, "NO DATA", transform=ax.transAxes,
                     ha="center", va="center", fontsize=14, color="#ccc", fontweight="bold")
-            ax.set_title(f"Seat {seat + 1}", fontsize=9, fontweight="bold", color="#ccc")
+            ax.set_title(_seat_label(seat, strokes), fontsize=9, fontweight="bold", color="#ccc")
             ax.tick_params(labelsize=6)
             ax.grid(alpha=0.2)
             continue
@@ -541,7 +559,7 @@ def _draw_drive_recovery_page(fig, strokes):
 
         ax.set_ylim(global_min, global_max)
         ax.set_title(
-            f"Seat {seat + 1}   |   avg: {seat_avg:.2f}   std: {seat_std:.2f}",
+            f"{_seat_label(seat, strokes)}   |   avg: {seat_avg:.2f}   std: {seat_std:.2f}",
             fontsize=9, fontweight="bold", color=SEAT_COLORS[seat])
         ax.tick_params(labelsize=6)
         ax.grid(alpha=0.2)
@@ -608,7 +626,7 @@ def _draw_correlation_page(fig, strokes, metric_key=None, metric_label=None,
     masked = np.ma.masked_invalid(corr)
     im = ax.imshow(masked, cmap=cmap, vmin=0, vmax=1, aspect="equal")
 
-    labels = [f"Seat {i+1}" for i in range(n_seats)]
+    labels = [_seat_label(i, strokes) for i in range(n_seats)]
     ax.set_xticks(range(n_seats))
     ax.set_yticks(range(n_seats))
     ax.set_xticklabels(labels, fontsize=9, rotation=45, ha="right")
@@ -687,16 +705,16 @@ def _draw_consistency_page(fig, strokes, overall_length, effective_length):
     ax = fig.add_axes([0.10, 0.15, 0.80, 0.65])
     ax.axis("off")
 
-    col_labels = ["Seat"] + [n for n in raw_stds] + \
+    col_labels = ["Name"] + [n for n in raw_stds] + \
                  [f"{n} Score" for n in raw_stds] + ["COMPOSITE"]
     n_cols = len(col_labels)
 
     cell_data = []
     for seat in range(8):
         if seat in dead:
-            row = [f"Seat {seat+1}"] + ["--"] * (n_cols - 1)
+            row = [_seat_label(seat, strokes)] + ["--"] * (n_cols - 1)
         else:
-            row = [f"Seat {seat+1}"]
+            row = [_seat_label(seat, strokes)]
             for name in raw_stds:
                 row.append(f"{raw_stds[name][seat]:.2f}")
             for name in normed:
@@ -765,7 +783,7 @@ def _draw_consistency_page(fig, strokes, overall_length, effective_length):
         bars_h.append(composite[s])
         bars_c.append(SEAT_COLORS[s])
 
-    ax2.bar([f"S{x+1}" for x in bars_x], bars_h, color=bars_c, edgecolor="white", width=0.6)
+    ax2.bar([_seat_label(x, strokes) for x in bars_x], bars_h, color=bars_c, edgecolor="white", width=0.6)
     ax2.set_ylim(0, 105)
     ax2.set_ylabel("Score", fontsize=8)
     ax2.tick_params(labelsize=7)
@@ -811,7 +829,7 @@ def _draw_power_efficiency_page(fig, strokes, effective_length):
         if seat in dead:
             ax.text(0.5, 0.5, "NO DATA", transform=ax.transAxes,
                     ha="center", va="center", fontsize=14, color="#ccc", fontweight="bold")
-            ax.set_title(f"Seat {seat + 1}", fontsize=9, fontweight="bold", color="#ccc")
+            ax.set_title(_seat_label(seat, strokes), fontsize=9, fontweight="bold", color="#ccc")
             ax.tick_params(labelsize=6)
             ax.grid(alpha=0.2)
             continue
@@ -827,7 +845,7 @@ def _draw_power_efficiency_page(fig, strokes, effective_length):
                     linestyle=":", alpha=0.6)
 
         ax.set_ylim(global_min, global_max)
-        ax.set_title(f"Seat {seat + 1}   |   avg: {seat_avg:.2f}   std: {seat_std:.2f}",
+        ax.set_title(f"{_seat_label(seat, strokes)}   |   avg: {seat_avg:.2f}   std: {seat_std:.2f}",
                      fontsize=9, fontweight="bold", color=SEAT_COLORS[seat])
         ax.tick_params(labelsize=6)
         ax.grid(alpha=0.2)
@@ -865,9 +883,9 @@ def _draw_stroke_heatmap_page(fig, strokes):
     ylabels = []
     for i in range(8):
         if i in dead:
-            ylabels.append(f"Seat {i+1} (N/A)")
+            ylabels.append(f"{_seat_label(i, strokes)} (N/A)")
         else:
-            ylabels.append(f"Seat {i+1}")
+            ylabels.append(_seat_label(i, strokes))
     ax.set_yticklabels(ylabels, fontsize=10)
 
     # X axis: show every Nth stroke label
@@ -945,7 +963,7 @@ def _draw_radar_page(fig, strokes, effective_length):
         ax = fig.add_subplot(gs[row, col], polar=True)
 
         if seat in dead:
-            ax.set_title(f"Seat {seat+1}", fontsize=9, fontweight="bold",
+            ax.set_title(_seat_label(seat, strokes), fontsize=9, fontweight="bold",
                          color="#ccc", pad=10)
             ax.set_yticklabels([])
             ax.set_xticklabels([])
@@ -963,7 +981,7 @@ def _draw_radar_page(fig, strokes, effective_length):
         ax.set_ylim(0, 1.05)
         ax.set_yticks([0.25, 0.5, 0.75, 1.0])
         ax.set_yticklabels(["25", "50", "75", "100"], fontsize=5, color="#999")
-        ax.set_title(f"Seat {seat+1}", fontsize=10, fontweight="bold",
+        ax.set_title(_seat_label(seat, strokes), fontsize=10, fontweight="bold",
                      color=SEAT_COLORS[seat], pad=12)
         ax.grid(alpha=0.3)
 
@@ -1010,7 +1028,7 @@ def _draw_work_distribution_page(fig, strokes):
         bottoms += vals
 
     ax.set_xticks(x)
-    ax.set_xticklabels([f"Seat {s+1}" for s in range(8)], fontsize=10)
+    ax.set_xticklabels([_seat_label(s, strokes) for s in range(8)], fontsize=10)
     ax.set_ylabel("Cumulative Work %", fontsize=11)
     ax.set_ylim(0, max(bottoms) * 1.08)
     ax.legend(loc="upper right", fontsize=9)
@@ -1080,7 +1098,7 @@ def _draw_force_application_page(fig, strokes):
                 va="center", fontsize=8, color=SEAT_COLORS[seat])
 
     ax.set_yticks(y_positions)
-    ax.set_yticklabels([f"Seat {s+1}" for s in range(8)], fontsize=10)
+    ax.set_yticklabels([_seat_label(s, strokes) for s in range(8)], fontsize=10)
     ax.set_xlabel("Angle (degrees)", fontsize=11)
     ax.invert_yaxis()
     ax.grid(axis="x", alpha=0.3)
@@ -1138,7 +1156,7 @@ def _draw_rate_response_page(fig, strokes, effective_length):
             r_range = np.linspace(r_valid.min(), r_valid.max(), 50)
             ax.plot(r_range, np.polyval(coeffs, r_range),
                     color=SEAT_COLORS[seat], linewidth=2,
-                    label=f"S{seat+1} ({coeffs[0]:+.1f}/spm)")
+                    label=f"{_seat_label(seat, strokes)} ({coeffs[0]:+.1f}/spm)")
 
         ax.legend(fontsize=7, loc="best", ncol=2)
 
@@ -1192,7 +1210,7 @@ def _draw_rolling_power_page(fig, strokes, effective_length):
                 continue
             y = rolling_avg(data[:, seat], window)
             ax.plot(stroke_nums, y, color=SEAT_COLORS[seat], linewidth=1.2,
-                    alpha=0.8, label=f"S{seat+1}")
+                    alpha=0.8, label=_seat_label(seat, strokes))
 
         if idx == 0:
             ax.legend(fontsize=6, loc="upper right", ncol=8,
@@ -1246,7 +1264,7 @@ def _draw_quartile_fingerprint_page(fig, strokes):
         ax = fig.add_subplot(gs[row, col], polar=True)
 
         if seat in dead:
-            ax.set_title(f"Seat {seat+1}", fontsize=9, fontweight="bold",
+            ax.set_title(_seat_label(seat, strokes), fontsize=9, fontweight="bold",
                          color="#ccc", pad=10)
             ax.set_yticklabels([])
             ax.set_xticklabels([])
@@ -1273,7 +1291,7 @@ def _draw_quartile_fingerprint_page(fig, strokes):
         ax.set_ylim(0, 1.1)
         ax.set_yticks([0.25, 0.5, 0.75, 1.0])
         ax.set_yticklabels(["", "", "", ""], fontsize=5)
-        ax.set_title(f"Seat {seat+1}", fontsize=10, fontweight="bold",
+        ax.set_title(_seat_label(seat, strokes), fontsize=10, fontweight="bold",
                      color=SEAT_COLORS[seat], pad=12)
         ax.grid(alpha=0.3)
 
@@ -1296,7 +1314,7 @@ def _detect_anomalies(strokes, overall_length, effective_length):
 
     # --- Helper ---
     def _add(severity, seat, desc):
-        label = f"Seat {seat + 1}" if seat is not None else "Crew"
+        label = _seat_label(seat, strokes) if seat is not None else "Crew"
         anomalies.append((severity, label, desc))
 
     # 1. High variance: seat std > 1.8× crew-average std for key metrics
