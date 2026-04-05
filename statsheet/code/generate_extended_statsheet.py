@@ -1303,7 +1303,7 @@ def _draw_quartile_fingerprint_page(fig, strokes):
 def _detect_anomalies(strokes, overall_length, effective_length):
     """Scan session data for negative anomalies a coach should know about.
 
-    Returns a list of (severity, seat_label, description) tuples sorted by severity.
+    Returns a list of (severity, seat_index, seat_label, description) tuples.
     severity: 'HIGH', 'MED', or 'LOW'.
     """
     anomalies = []
@@ -1315,7 +1315,7 @@ def _detect_anomalies(strokes, overall_length, effective_length):
     # --- Helper ---
     def _add(severity, seat, desc):
         label = _seat_label(seat, strokes) if seat is not None else "Crew"
-        anomalies.append((severity, label, desc))
+        anomalies.append((severity, seat, label, desc))
 
     # 1. High variance: seat std > 1.8× crew-average std for key metrics
     variance_checks = [
@@ -1398,91 +1398,97 @@ def _detect_anomalies(strokes, overall_length, effective_length):
                          f"Effective length shortened {drop_pct:.0f}% from first "
                          f"to last quarter ({first_q:.1f}° → {last_q:.1f}°)")
 
-    # 7. Drive:Recovery ratio outlier
-    drive = strokes["Drive Time"]
-    recovery = strokes["Recovery Time"]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.where(recovery > 0, drive / recovery, np.nan)
-    ratio_avgs = np.array([np.nanmean(ratio[:, s]) for s in range(8)])
-    crew_ratio = np.nanmean(ratio_avgs[live_seats])
-    crew_ratio_std = np.nanstd(ratio_avgs[live_seats])
-    if crew_ratio_std > 0:
-        for s in live_seats:
-            z = (ratio_avgs[s] - crew_ratio) / crew_ratio_std
-            if z > 1.5:
-                _add("LOW", s,
-                     f"Drive:Recovery ratio {ratio_avgs[s]:.2f} is high vs "
-                     f"crew avg {crew_ratio:.2f} (rushing the slide)")
-
     # Sort: HIGH first, then MED, then LOW
     order = {"HIGH": 0, "MED": 1, "LOW": 2}
     anomalies.sort(key=lambda x: order[x[0]])
     return anomalies
 
 
-def _draw_anomaly_page(fig, anomalies, session_name):
-    """Final page: Experimental Anomaly Report — table of flagged issues."""
-    fig.text(0.5, 0.95, f"Experimental Anomaly Report — {session_name}",
+def _draw_anomaly_page(fig, anomalies, session_name, strokes):
+    """Final page: Experimental Anomaly Report — 8 boxes grouped by rower."""
+    fig.text(0.5, 0.97, f"Experimental Anomaly Report — {session_name}",
              fontsize=18, fontweight="bold", ha="center", va="top",
              family="sans-serif", color="#2c3e50")
-    fig.text(0.5, 0.91,
-             "Automatically detected issues that may need attention",
-             fontsize=10, ha="center", va="top", color="#555",
+    fig.text(0.5, 0.935,
+             "Automatically detected issues grouped by rower  |  "
+             "HIGH = red   MED = orange   LOW = blue",
+             fontsize=9, ha="center", va="top", color="#555",
              family="sans-serif")
 
-    ax = fig.add_axes([0.05, 0.05, 0.9, 0.82])
-    ax.axis("off")
-
-    if not anomalies:
-        fig.text(0.5, 0.5, "No anomalies detected — clean session!",
-                 fontsize=20, ha="center", va="center", color="#2ecc71",
-                 fontweight="bold", family="sans-serif")
-        return
+    dead = strokes.get("dead_seats", set())
 
     SEV_COLORS = {
         "HIGH": "#e74c3c",
         "MED": "#f39c12",
         "LOW": "#3498db",
     }
-    SEV_BG = {
-        "HIGH": (0.98, 0.85, 0.85),
-        "MED": (1.0, 0.95, 0.82),
-        "LOW": (0.87, 0.93, 1.0),
-    }
 
-    col_labels = ["Severity", "Seat", "Issue"]
-    cell_data = [[sev, seat, desc] for sev, seat, desc in anomalies]
+    # Group anomalies by seat index
+    seat_anomalies = {s: [] for s in range(8)}
+    for sev, seat_idx, label, desc in anomalies:
+        if seat_idx is not None:
+            seat_anomalies[seat_idx].append((sev, desc))
 
-    table = ax.table(
-        cellText=cell_data,
-        colLabels=col_labels,
-        loc="upper center",
-        cellLoc="left",
-        colWidths=[0.08, 0.08, 0.84],
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1, 1.8)
+    gs = fig.add_gridspec(4, 2, hspace=0.3, wspace=0.15,
+                          left=0.04, right=0.96, top=0.90, bottom=0.03)
 
-    # Style header
-    for j in range(3):
-        cell = table[0, j]
-        cell.set_facecolor("#2c3e50")
-        cell.set_text_props(color="white", fontweight="bold", fontsize=9)
+    for seat in range(8):
+        row, col = divmod(seat, 2)
+        ax = fig.add_subplot(gs[row, col])
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis("off")
 
-    # Style rows
-    for i, (sev, seat, desc) in enumerate(anomalies):
-        table[i + 1, 0].set_text_props(fontweight="bold", color=SEV_COLORS[sev])
-        table[i + 1, 0].set_facecolor(SEV_BG[sev])
-        table[i + 1, 1].set_facecolor(SEV_BG[sev])
-        table[i + 1, 1].set_text_props(fontweight="bold")
-        table[i + 1, 2].set_facecolor(SEV_BG[sev])
+        name = _seat_label(seat, strokes)
 
-    # Legend at bottom
-    fig.text(0.05, 0.02,
-             "HIGH = likely hurting boat speed    MED = worth investigating    "
-             "LOW = minor, monitor over time",
-             fontsize=8, color="#777", family="sans-serif")
+        if seat in dead:
+            ax.set_facecolor("#f5f5f5")
+            ax.text(0.5, 0.5, f"{name}\nNO DATA", ha="center", va="center",
+                    fontsize=11, color="#ccc", fontweight="bold",
+                    family="sans-serif")
+            for spine in ax.spines.values():
+                spine.set_visible(True)
+                spine.set_color("#ddd")
+            continue
+
+        items = seat_anomalies.get(seat, [])
+
+        # Draw border — color based on worst severity
+        border_color = "#2ecc71"  # green = clean
+        if items:
+            if any(s == "HIGH" for s, _ in items):
+                border_color = "#e74c3c"
+            elif any(s == "MED" for s, _ in items):
+                border_color = "#f39c12"
+            else:
+                border_color = "#3498db"
+
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_color(border_color)
+            spine.set_linewidth(2.5)
+
+        # Header
+        ax.text(0.5, 0.92, name, ha="center", va="top",
+                fontsize=12, fontweight="bold", color=SEAT_COLORS[seat],
+                family="sans-serif")
+
+        if not items:
+            ax.text(0.5, 0.45, "No issues detected", ha="center", va="center",
+                    fontsize=10, color="#2ecc71", fontstyle="italic",
+                    family="sans-serif")
+        else:
+            y_pos = 0.78
+            line_step = 0.78 / max(len(items), 1)
+            line_step = min(line_step, 0.16)
+            for sev, desc in items:
+                marker_color = SEV_COLORS[sev]
+                ax.plot(0.03, y_pos, "s", color=marker_color, markersize=6,
+                        transform=ax.transData, clip_on=False)
+                ax.text(0.07, y_pos, f"[{sev}] {desc}", ha="left", va="center",
+                        fontsize=7, color="#333", family="sans-serif",
+                        wrap=True)
+                y_pos -= line_step
 
 
 # ---------------------------------------------------------------------------
@@ -1740,7 +1746,7 @@ def generate_pdf(strokes, output_path, session_name):
         anomalies = _detect_anomalies(strokes, overall_length, effective_length)
         fig = plt.figure(figsize=(16.5, 11.7))
         fig.patch.set_facecolor("white")
-        _draw_anomaly_page(fig, anomalies, session_name)
+        _draw_anomaly_page(fig, anomalies, session_name, strokes)
         pdf.savefig(fig)
         plt.close(fig)
         n_anomalies = len(anomalies)
