@@ -113,22 +113,36 @@ def parse_csv(csv_path):
     return strokes
 
 
-def _remove_outliers(strokes, metric_names, iqr_factor=5.0):
+def _remove_outliers(strokes, metric_names, iqr_factor=10.0):
     """Replace malfunction-level outlier values with NaN per seat per metric.
 
-    Uses a wide IQR threshold (5x) to only catch sensor malfunctions,
-    not natural variation. Outlier values are NaN'd for that specific
-    seat/stroke — other seats and strokes are kept intact.
+    Uses a very wide IQR threshold (10x) with a minimum IQR floor so that
+    tight distributions don't produce unreasonably narrow bounds. Only
+    truly ridiculous sensor malfunctions get removed.
     """
     n_seats = 8
     total_nans = 0
 
+    # Minimum IQR floors so tight data doesn't clip real values
+    iqr_floors = {
+        "SwivelPower": 30.0,
+        "Rower Swivel Power": 30.0,
+        "MinAngle": 3.0,
+        "MaxAngle": 3.0,
+        "CatchSlip": 2.0,
+        "FinishSlip": 2.0,
+        "Drive Time": 0.1,
+        "Recovery Time": 0.1,
+    }
+    default_floor = 5.0
+
     for name in metric_names:
         data = strokes[name].astype(float)
+        floor = iqr_floors.get(name, default_floor)
         for seat in range(n_seats):
             col = data[:, seat]
             q1, q3 = np.percentile(col, [25, 75])
-            iqr = q3 - q1
+            iqr = max(q3 - q1, floor)
             lower = q1 - iqr_factor * iqr
             upper = q3 + iqr_factor * iqr
             bad = (col < lower) | (col > upper)

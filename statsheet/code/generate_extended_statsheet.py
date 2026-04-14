@@ -120,17 +120,30 @@ def parse_csv(csv_path):
     return strokes
 
 
-def _remove_outliers(strokes, metric_names, iqr_factor=5.0):
+def _remove_outliers(strokes, metric_names, iqr_factor=10.0):
     """Replace malfunction-level outlier values with NaN per seat per metric."""
     n_seats = 8
     total_nans = 0
 
+    iqr_floors = {
+        "SwivelPower": 30.0,
+        "Rower Swivel Power": 30.0,
+        "MinAngle": 3.0,
+        "MaxAngle": 3.0,
+        "CatchSlip": 2.0,
+        "FinishSlip": 2.0,
+        "Drive Time": 0.1,
+        "Recovery Time": 0.1,
+    }
+    default_floor = 5.0
+
     for name in metric_names:
         data = strokes[name].astype(float)
+        floor = iqr_floors.get(name, default_floor)
         for seat in range(n_seats):
             col = data[:, seat]
             q1, q3 = np.percentile(col, [25, 75])
-            iqr = q3 - q1
+            iqr = max(q3 - q1, floor)
             lower = q1 - iqr_factor * iqr
             upper = q3 + iqr_factor * iqr
             bad = (col < lower) | (col > upper)
@@ -1596,71 +1609,6 @@ def generate_pdf(strokes, output_path, session_name):
         print(f"  Page {page_num}: Drive:Recovery Ratio")
         page_num += 1
 
-        # ---------------------------------------------------------------
-        # Breaker page: Correlation Heatmaps
-        # ---------------------------------------------------------------
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        fig.text(0.5, 0.5, "Correlation Heatmaps", fontsize=36,
-                 fontweight="bold", ha="center", va="center",
-                 color="#2c3e50", family="sans-serif")
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: --- Correlation Heatmaps ---")
-        page_num += 1
-
-        # Per-metric correlation pages
-        corr_metrics = [
-            ("SwivelPower", "Swivel Power (watts)", None),
-            ("MinAngle", "Min Angle (deg)", None),
-            ("MaxAngle", "Max Angle (deg)", None),
-            ("CatchSlip", "Catch Slip (deg)", None),
-            ("FinishSlip", "Finish Slip (deg)", None),
-            ("Drive Start T", "Drive Start T (ms)", None),
-            ("Rower Swivel Power", "Rower Swivel Power", None),
-            ("Drive Time", "Drive Time (s)", None),
-            ("Recovery Time", "Recovery Time (s)", None),
-            ("Angle Max F", "Angle at Max Force (deg)", None),
-            ("Angle 0.7 F", "Angle at 0.7× Force (deg)", None),
-            ("Work PC Q1", "Work PC Q1 (%)", None),
-            ("Work PC Q2", "Work PC Q2 (%)", None),
-            ("Work PC Q3", "Work PC Q3 (%)", None),
-            ("Work PC Q4", "Work PC Q4 (%)", None),
-            ("Max Force PC", "Max Force PC (%)", None),
-            (None, "Overall Length (deg)", overall_length),
-            (None, "Effective Length (deg)", effective_length),
-        ]
-
-        dead = strokes.get("dead_seats", set())
-        all_corr_matrices = []
-
-        for metric_key, label, derived_data in corr_metrics:
-            fig = plt.figure(figsize=(16.5, 11.7))
-            fig.patch.set_facecolor("white")
-            d = derived_data if derived_data is not None else strokes[metric_key]
-            corr_mat = _compute_corr_matrix(d, dead)
-            all_corr_matrices.append(corr_mat)
-            _draw_correlation_page(fig, strokes, metric_label=label,
-                                   corr_matrix=corr_mat)
-            pdf.savefig(fig)
-            plt.close(fig)
-            print(f"  Page {page_num}: Correlation — {label}")
-            page_num += 1
-
-        # Combined correlation heatmap (average of all per-metric matrices)
-        stacked = np.stack(all_corr_matrices, axis=0)
-        combined_corr = np.nanmean(stacked, axis=0)
-
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_correlation_page(fig, strokes,
-                               metric_label="Combined (avg across all metrics)",
-                               corr_matrix=combined_corr)
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: Correlation — Combined")
-        page_num += 1
-
         # Composite Consistency Score
         fig = plt.figure(figsize=(16.5, 11.7))
         fig.patch.set_facecolor("white")
@@ -1677,15 +1625,6 @@ def generate_pdf(strokes, output_path, session_name):
         pdf.savefig(fig)
         plt.close(fig)
         print(f"  Page {page_num}: Power Efficiency")
-        page_num += 1
-
-        # Stroke Heatmap
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_stroke_heatmap_page(fig, strokes)
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: Stroke Power Heatmap")
         page_num += 1
 
         # Technique Radar
@@ -1742,7 +1681,7 @@ def generate_pdf(strokes, output_path, session_name):
         print(f"  Page {page_num}: Power Quartile Fingerprint")
         page_num += 1
 
-        # Final page: Experimental Anomaly Report
+        # Anomaly Report
         anomalies = _detect_anomalies(strokes, overall_length, effective_length)
         fig = plt.figure(figsize=(16.5, 11.7))
         fig.patch.set_facecolor("white")
@@ -1751,6 +1690,80 @@ def generate_pdf(strokes, output_path, session_name):
         plt.close(fig)
         n_anomalies = len(anomalies)
         print(f"  Page {page_num}: Experimental Anomaly Report ({n_anomalies} issues)")
+        page_num += 1
+
+        # ---------------------------------------------------------------
+        # Breaker page: Heatmaps
+        # ---------------------------------------------------------------
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        fig.text(0.5, 0.5, "Heatmaps", fontsize=36,
+                 fontweight="bold", ha="center", va="center",
+                 color="#2c3e50", family="sans-serif")
+        pdf.savefig(fig)
+        plt.close(fig)
+        print(f"  Page {page_num}: --- Heatmaps ---")
+        page_num += 1
+
+        # Stroke Power Heatmap
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_stroke_heatmap_page(fig, strokes)
+        pdf.savefig(fig)
+        plt.close(fig)
+        print(f"  Page {page_num}: Stroke Power Heatmap")
+        page_num += 1
+
+        # Per-metric correlation pages
+        corr_metrics = [
+            ("SwivelPower", "Swivel Power (watts)", None),
+            ("MinAngle", "Min Angle (deg)", None),
+            ("MaxAngle", "Max Angle (deg)", None),
+            ("CatchSlip", "Catch Slip (deg)", None),
+            ("FinishSlip", "Finish Slip (deg)", None),
+            ("Drive Start T", "Drive Start T (ms)", None),
+            ("Rower Swivel Power", "Rower Swivel Power", None),
+            ("Drive Time", "Drive Time (s)", None),
+            ("Recovery Time", "Recovery Time (s)", None),
+            ("Angle Max F", "Angle at Max Force (deg)", None),
+            ("Angle 0.7 F", "Angle at 0.7× Force (deg)", None),
+            ("Work PC Q1", "Work PC Q1 (%)", None),
+            ("Work PC Q2", "Work PC Q2 (%)", None),
+            ("Work PC Q3", "Work PC Q3 (%)", None),
+            ("Work PC Q4", "Work PC Q4 (%)", None),
+            ("Max Force PC", "Max Force PC (%)", None),
+            (None, "Overall Length (deg)", overall_length),
+            (None, "Effective Length (deg)", effective_length),
+        ]
+
+        dead = strokes.get("dead_seats", set())
+        all_corr_matrices = []
+
+        for metric_key, label, derived_data in corr_metrics:
+            fig = plt.figure(figsize=(16.5, 11.7))
+            fig.patch.set_facecolor("white")
+            d = derived_data if derived_data is not None else strokes[metric_key]
+            corr_mat = _compute_corr_matrix(d, dead)
+            all_corr_matrices.append(corr_mat)
+            _draw_correlation_page(fig, strokes, metric_label=label,
+                                   corr_matrix=corr_mat)
+            pdf.savefig(fig)
+            plt.close(fig)
+            print(f"  Page {page_num}: Correlation — {label}")
+            page_num += 1
+
+        # Combined correlation heatmap (average of all per-metric matrices)
+        stacked = np.stack(all_corr_matrices, axis=0)
+        combined_corr = np.nanmean(stacked, axis=0)
+
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_correlation_page(fig, strokes,
+                               metric_label="Combined (avg across all metrics)",
+                               corr_matrix=combined_corr)
+        pdf.savefig(fig)
+        plt.close(fig)
+        print(f"  Page {page_num}: Correlation — Combined")
         page_num += 1
 
     print(f"\nPDF saved to {output_path}")
