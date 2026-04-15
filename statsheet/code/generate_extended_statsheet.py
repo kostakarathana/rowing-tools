@@ -451,7 +451,7 @@ def _draw_crew_timing_page(fig, strokes):
     fig.text(0.5, 0.97, "Crew Timing Sync — Drive Start Offset",
              fontsize=16, fontweight="bold", ha="center", family="sans-serif")
     fig.text(0.5, 0.935,
-             "Each seat's Drive Start T minus crew average (ms)  |  0 = perfectly in sync",
+             "Each seat's Drive Start T minus stroke seat (ms)  |  0 = perfectly in sync",
              fontsize=10, ha="center", color="#555", family="sans-serif")
 
     dead = strokes.get("dead_seats", set())
@@ -460,9 +460,9 @@ def _draw_crew_timing_page(fig, strokes):
     n_strokes = dst.shape[0]
     x = np.arange(n_strokes)
 
-    # Crew average per stroke (only live seats)
-    crew_avg = np.nanmean(dst[:, live_seats], axis=1)  # (n_strokes,)
-    offsets = dst - crew_avg[:, np.newaxis]  # (n_strokes, 8)
+    # Use stroke seat (seat 8, index 7) as reference
+    stroke_seat_ref = dst[:, 7]  # (n_strokes,)
+    offsets = dst - stroke_seat_ref[:, np.newaxis]  # (n_strokes, 8)
 
     gs = fig.add_gridspec(4, 2, hspace=0.45, wspace=0.2,
                           left=0.07, right=0.95, top=0.90, bottom=0.05)
@@ -1627,15 +1627,6 @@ def generate_pdf(strokes, output_path, session_name):
         print(f"  Page {page_num}: Power Efficiency")
         page_num += 1
 
-        # Technique Radar
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_radar_page(fig, strokes, effective_length)
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: Technique Radar")
-        page_num += 1
-
         # Work Distribution Profile
         fig = plt.figure(figsize=(16.5, 11.7))
         fig.patch.set_facecolor("white")
@@ -1645,15 +1636,6 @@ def generate_pdf(strokes, output_path, session_name):
         print(f"  Page {page_num}: Work Distribution Profile")
         page_num += 1
 
-        # Force Application Window
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_force_application_page(fig, strokes)
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: Force Application Window")
-        page_num += 1
-
         # Rate Response Curves
         fig = plt.figure(figsize=(16.5, 11.7))
         fig.patch.set_facecolor("white")
@@ -1661,24 +1643,6 @@ def generate_pdf(strokes, output_path, session_name):
         pdf.savefig(fig)
         plt.close(fig)
         print(f"  Page {page_num}: Rate Response Curves")
-        page_num += 1
-
-        # Rolling Power Dashboard
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_rolling_power_page(fig, strokes, effective_length)
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: Rolling Power Dashboard")
-        page_num += 1
-
-        # Power Quartile Fingerprint
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_quartile_fingerprint_page(fig, strokes)
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: Power Quartile Fingerprint")
         page_num += 1
 
         # Anomaly Report
@@ -1714,56 +1678,18 @@ def generate_pdf(strokes, output_path, session_name):
         print(f"  Page {page_num}: Stroke Power Heatmap")
         page_num += 1
 
-        # Per-metric correlation pages
-        corr_metrics = [
-            ("SwivelPower", "Swivel Power (watts)", None),
-            ("MinAngle", "Min Angle (deg)", None),
-            ("MaxAngle", "Max Angle (deg)", None),
-            ("CatchSlip", "Catch Slip (deg)", None),
-            ("FinishSlip", "Finish Slip (deg)", None),
-            ("Drive Start T", "Drive Start T (ms)", None),
-            ("Rower Swivel Power", "Rower Swivel Power", None),
-            ("Drive Time", "Drive Time (s)", None),
-            ("Recovery Time", "Recovery Time (s)", None),
-            ("Angle Max F", "Angle at Max Force (deg)", None),
-            ("Angle 0.7 F", "Angle at 0.7× Force (deg)", None),
-            ("Work PC Q1", "Work PC Q1 (%)", None),
-            ("Work PC Q2", "Work PC Q2 (%)", None),
-            ("Work PC Q3", "Work PC Q3 (%)", None),
-            ("Work PC Q4", "Work PC Q4 (%)", None),
-            ("Max Force PC", "Max Force PC (%)", None),
-            (None, "Overall Length (deg)", overall_length),
-            (None, "Effective Length (deg)", effective_length),
-        ]
-
+        # Watts correlation heatmap
         dead = strokes.get("dead_seats", set())
-        all_corr_matrices = []
-
-        for metric_key, label, derived_data in corr_metrics:
-            fig = plt.figure(figsize=(16.5, 11.7))
-            fig.patch.set_facecolor("white")
-            d = derived_data if derived_data is not None else strokes[metric_key]
-            corr_mat = _compute_corr_matrix(d, dead)
-            all_corr_matrices.append(corr_mat)
-            _draw_correlation_page(fig, strokes, metric_label=label,
-                                   corr_matrix=corr_mat)
-            pdf.savefig(fig)
-            plt.close(fig)
-            print(f"  Page {page_num}: Correlation — {label}")
-            page_num += 1
-
-        # Combined correlation heatmap (average of all per-metric matrices)
-        stacked = np.stack(all_corr_matrices, axis=0)
-        combined_corr = np.nanmean(stacked, axis=0)
+        watts_corr = _compute_corr_matrix(strokes["SwivelPower"], dead)
 
         fig = plt.figure(figsize=(16.5, 11.7))
         fig.patch.set_facecolor("white")
         _draw_correlation_page(fig, strokes,
-                               metric_label="Combined (avg across all metrics)",
-                               corr_matrix=combined_corr)
+                               metric_label="Swivel Power (watts)",
+                               corr_matrix=watts_corr)
         pdf.savefig(fig)
         plt.close(fig)
-        print(f"  Page {page_num}: Correlation — Combined")
+        print(f"  Page {page_num}: Correlation — Watts")
         page_num += 1
 
     print(f"\nPDF saved to {output_path}")
