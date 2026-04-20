@@ -463,6 +463,11 @@ def _detect_anomalies(strokes, overall_length, effective_length):
         label = _seat_label(seat, strokes) if seat is not None else "Crew"
         anomalies.append((severity, seat, label, desc))
 
+    power = strokes["SwivelPower"]
+    n = power.shape[0]
+    q1_end = n // 4
+    q4_start = n - n // 4
+
     # 1. High variance: seat std > 1.8× crew-average std for key metrics
     variance_checks = [
         ("Avg Watts", strokes["SwivelPower"]),
@@ -477,24 +482,20 @@ def _detect_anomalies(strokes, overall_length, effective_length):
             if crew_avg_std > 0 and stds[s] > 1.8 * crew_avg_std:
                 ratio = stds[s] / crew_avg_std
                 _add("HIGH", s,
-                     f"{name} variance is {ratio:.1f}× the crew average "
-                     f"(std {stds[s]:.1f} vs crew avg std {crew_avg_std:.1f})")
+                     f"{name} variance {ratio:.1f}× crew avg "
+                     f"(std {stds[s]:.1f} vs {crew_avg_std:.1f})")
 
-    # 2. Power fade: last-quarter avg power < first-quarter by >12%
-    power = strokes["SwivelPower"]
-    n = power.shape[0]
-    q1_end = n // 4
-    q4_start = n - n // 4
+    # 2. Power fade: last-quarter avg power < first-quarter by >40%
     if q1_end > 2 and (n - q4_start) > 2:
         for s in live_seats:
             first_q = np.nanmean(power[:q1_end, s])
             last_q = np.nanmean(power[q4_start:, s])
             if first_q > 0:
                 drop_pct = (first_q - last_q) / first_q * 100
-                if drop_pct > 12:
-                    sev = "HIGH" if drop_pct > 20 else "MED"
+                if drop_pct > 40:
+                    sev = "HIGH" if drop_pct > 50 else "MED"
                     _add(sev, s,
-                         f"Power faded {drop_pct:.0f}% from first to last quarter "
+                         f"Power faded {drop_pct:.0f}% "
                          f"({first_q:.0f}W → {last_q:.0f}W)")
 
     # 3. Excessive slip: seat avg catch/finish slip > 1.5× crew average
@@ -506,8 +507,8 @@ def _detect_anomalies(strokes, overall_length, effective_length):
         for s in live_seats:
             if crew_avg > 0 and avgs[s] > 1.5 * crew_avg:
                 _add("MED", s,
-                     f"{slip_name} avg {avgs[s]:.1f}° is {avgs[s]/crew_avg:.1f}× "
-                     f"the crew average ({crew_avg:.1f}°)")
+                     f"{slip_name} {avgs[s]:.1f}° is {avgs[s]/crew_avg:.1f}× "
+                     f"crew avg ({crew_avg:.1f}°)")
 
     # 4. Low power outlier: seat avg watts > 1.5 std devs below crew mean
     power_avgs = np.array([np.nanmean(power[:, s]) for s in range(8)])
@@ -518,7 +519,7 @@ def _detect_anomalies(strokes, overall_length, effective_length):
             z = (power_avgs[s] - crew_mean) / crew_std
             if z < -1.5:
                 _add("MED", s,
-                     f"Avg power {power_avgs[s]:.0f}W is {abs(z):.1f} std devs "
+                     f"Avg power {power_avgs[s]:.0f}W is {abs(z):.1f}σ "
                      f"below crew mean ({crew_mean:.0f}W)")
 
     # 5. Timing consistency: drive start time std much higher than crew avg
@@ -529,8 +530,8 @@ def _detect_anomalies(strokes, overall_length, effective_length):
         for s in live_seats:
             if dst_stds[s] > 1.8 * crew_dst_std:
                 _add("MED", s,
-                     f"Timing variability is {dst_stds[s]/crew_dst_std:.1f}× "
-                     f"the crew average (inconsistent catch timing)")
+                     f"Timing variability {dst_stds[s]/crew_dst_std:.1f}× "
+                     f"crew avg (inconsistent catch)")
 
     # 6. Effective length fade
     if q1_end > 2 and (n - q4_start) > 2:
@@ -541,8 +542,20 @@ def _detect_anomalies(strokes, overall_length, effective_length):
                 drop_pct = (first_q - last_q) / first_q * 100
                 if drop_pct > 8:
                     _add("LOW", s,
-                         f"Effective length shortened {drop_pct:.0f}% from first "
-                         f"to last quarter ({first_q:.1f}° → {last_q:.1f}°)")
+                         f"Eff. length shortened {drop_pct:.0f}% "
+                         f"({first_q:.1f}° → {last_q:.1f}°)")
+
+    # 7. Short effective arc: seat avg eff length > 1.5σ below crew mean
+    eff_avgs = np.array([np.nanmean(effective_length[:, s]) for s in range(8)])
+    eff_crew_mean = np.nanmean(eff_avgs[live_seats])
+    eff_crew_std = np.nanstd(eff_avgs[live_seats])
+    if eff_crew_std > 0:
+        for s in live_seats:
+            z = (eff_avgs[s] - eff_crew_mean) / eff_crew_std
+            if z < -1.5:
+                _add("MED", s,
+                     f"Short arc — eff. length {eff_avgs[s]:.1f}° is "
+                     f"{abs(z):.1f}σ below crew ({eff_crew_mean:.1f}°)")
 
     # Sort: HIGH first, then MED, then LOW
     order = {"HIGH": 0, "MED": 1, "LOW": 2}
@@ -551,15 +564,10 @@ def _detect_anomalies(strokes, overall_length, effective_length):
 
 
 def _draw_anomaly_page(fig, anomalies, session_name, strokes):
-    """Final page: Experimental Anomaly Report — 8 boxes grouped by rower."""
-    fig.text(0.5, 0.97, f"Experimental Anomaly Report — {session_name}",
+    """Anomaly Report — clean table with one row per rower, issues listed."""
+    fig.text(0.5, 0.97, f"Anomaly Report — {session_name}",
              fontsize=18, fontweight="bold", ha="center", va="top",
              family="sans-serif", color="#2c3e50")
-    fig.text(0.5, 0.935,
-             "Automatically detected issues grouped by rower  |  "
-             "HIGH = red   MED = orange   LOW = blue",
-             fontsize=9, ha="center", va="top", color="#555",
-             family="sans-serif")
 
     dead = strokes.get("dead_seats", set())
 
@@ -575,67 +583,93 @@ def _draw_anomaly_page(fig, anomalies, session_name, strokes):
         if seat_idx is not None:
             seat_anomalies[seat_idx].append((sev, desc))
 
-    gs = fig.add_gridspec(4, 2, hspace=0.3, wspace=0.15,
-                          left=0.04, right=0.96, top=0.90, bottom=0.03)
+    ax = fig.add_axes([0.03, 0.04, 0.94, 0.88])
+    ax.axis("off")
+
+    # Build table data: Name | Status | Issues
+    col_labels = ["Name", "Status", "Issues"]
+    cell_data = []
+    cell_colors = []
 
     for seat in range(8):
-        row, col = divmod(seat, 2)
-        ax = fig.add_subplot(gs[row, col])
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.axis("off")
-
         name = _seat_label(seat, strokes)
-
         if seat in dead:
-            ax.set_facecolor("#f5f5f5")
-            ax.text(0.5, 0.5, f"{name}\nNO DATA", ha="center", va="center",
-                    fontsize=11, color="#ccc", fontweight="bold",
-                    family="sans-serif")
-            # Draw border
-            for spine in ax.spines.values():
-                spine.set_visible(True)
-                spine.set_color("#ddd")
+            cell_data.append([name, "NO DATA", "—"])
+            cell_colors.append(["#d5d5d5", "#d5d5d5", "#d5d5d5"])
             continue
 
         items = seat_anomalies.get(seat, [])
-
-        # Draw border — color based on worst severity
-        border_color = "#2ecc71"  # green = clean
-        if items:
-            if any(s == "HIGH" for s, _ in items):
-                border_color = "#e74c3c"
-            elif any(s == "MED" for s, _ in items):
-                border_color = "#f39c12"
-            else:
-                border_color = "#3498db"
-
-        for spine in ax.spines.values():
-            spine.set_visible(True)
-            spine.set_color(border_color)
-            spine.set_linewidth(2.5)
-
-        # Header
-        ax.text(0.5, 0.92, name, ha="center", va="top",
-                fontsize=12, fontweight="bold", color=SEAT_COLORS[seat],
-                family="sans-serif")
-
         if not items:
-            ax.text(0.5, 0.45, "No issues detected", ha="center", va="center",
-                    fontsize=10, color="#2ecc71", fontstyle="italic",
-                    family="sans-serif")
+            cell_data.append([name, "CLEAN", "No issues detected"])
+            cell_colors.append(["#eafaf1", "#eafaf1", "#eafaf1"])
         else:
-            y_pos = 0.78
-            line_step = 0.78 / max(len(items), 1)
-            line_step = min(line_step, 0.16)
+            if any(s == "HIGH" for s, _ in items):
+                status = f"{len(items)} issue{'s' if len(items) > 1 else ''}"
+                row_bg = "#fdedec"
+            elif any(s == "MED" for s, _ in items):
+                status = f"{len(items)} issue{'s' if len(items) > 1 else ''}"
+                row_bg = "#fef9e7"
+            else:
+                status = f"{len(items)} issue{'s' if len(items) > 1 else ''}"
+                row_bg = "#ebf5fb"
+
+            issue_lines = []
             for sev, desc in items:
-                marker_color = SEV_COLORS[sev]
-                ax.plot(0.03, y_pos, "s", color=marker_color, markersize=6,
-                        transform=ax.transData, clip_on=False)
-                ax.text(0.07, y_pos, f"[{sev}] {desc}", ha="left", va="center",
-                        fontsize=7, color="#333", family="sans-serif",
-                        wrap=True)
-                y_pos -= line_step
+                issue_lines.append(f"[{sev}] {desc}")
+            issues_text = "  |  ".join(issue_lines)
+
+            cell_data.append([name, status, issues_text])
+            cell_colors.append([row_bg, row_bg, row_bg])
+
+    table = ax.table(
+        cellText=cell_data,
+        colLabels=col_labels,
+        loc="upper center",
+        cellLoc="left",
+        colWidths=[0.10, 0.08, 0.82],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 3.0)
+
+    for j in range(3):
+        cell = table[0, j]
+        cell.set_facecolor("#2c3e50")
+        cell.set_text_props(color="white", fontweight="bold", fontsize=9)
+
+    for i in range(8):
+        for j in range(3):
+            cell = table[i + 1, j]
+            cell.set_facecolor(cell_colors[i][j])
+            if j == 0:
+                cell.set_text_props(fontweight="bold",
+                                    color=SEAT_COLORS[i] if i not in dead else "#999")
+            elif j == 1:
+                seat_items = seat_anomalies.get(i, [])
+                if i in dead:
+                    cell.set_text_props(color="#999")
+                elif not seat_items:
+                    cell.set_text_props(color="#27ae60", fontweight="bold")
+                elif any(s == "HIGH" for s, _ in seat_items):
+                    cell.set_text_props(color="#e74c3c", fontweight="bold")
+                elif any(s == "MED" for s, _ in seat_items):
+                    cell.set_text_props(color="#f39c12", fontweight="bold")
+                else:
+                    cell.set_text_props(color="#3498db", fontweight="bold")
+            elif j == 2:
+                cell.set_text_props(fontsize=7)
+
+    n_high = sum(1 for s, _, _, _ in anomalies if s == "HIGH")
+    n_med = sum(1 for s, _, _, _ in anomalies if s == "MED")
+    n_low = sum(1 for s, _, _, _ in anomalies if s == "LOW")
+    clean_count = sum(1 for s in range(8)
+                      if s not in dead and not seat_anomalies.get(s, []))
+    fig.text(0.5, 0.935,
+             f"{len(anomalies)} total issues  |  "
+             f"{n_high} HIGH  •  {n_med} MED  •  {n_low} LOW  |  "
+             f"{clean_count} clean rowers",
+             fontsize=10, ha="center", va="top", color="#555",
+             family="sans-serif")
 
 
 def generate_pdf(strokes, output_path, session_name):
@@ -645,21 +679,36 @@ def generate_pdf(strokes, output_path, session_name):
     effective_length = overall_length - strokes["CatchSlip"] - strokes["FinishSlip"]
 
     with PdfPages(str(output_path)) as pdf:
+        page_num = 1
+
         # Page 1: Summary table
         fig = plt.figure(figsize=(16.5, 11.7))
         fig.patch.set_facecolor("white")
         _draw_summary_table(fig, strokes, overall_length, effective_length, session_name)
         pdf.savefig(fig)
         plt.close(fig)
-        print("  Page 1: Summary table")
+        print(f"  Page {page_num}: Summary table")
+        page_num += 1
 
-        # Page 2: Angle arc plot
+        # Page 2: Anomaly Report
+        anomalies = _detect_anomalies(strokes, overall_length, effective_length)
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_anomaly_page(fig, anomalies, session_name, strokes)
+        pdf.savefig(fig)
+        plt.close(fig)
+        n_anomalies = len(anomalies)
+        print(f"  Page {page_num}: Anomaly Report ({n_anomalies} issues)")
+        page_num += 1
+
+        # Angle arc plot
         fig = plt.figure(figsize=(16.5, 11.7))
         fig.patch.set_facecolor("white")
         _draw_angle_page(fig, strokes)
         pdf.savefig(fig)
         plt.close(fig)
-        print("  Page 2: Stroke arc breakdown")
+        print(f"  Page {page_num}: Stroke arc breakdown")
+        page_num += 1
 
         # Core metric pages
         core_pages = [
@@ -677,7 +726,6 @@ def generate_pdf(strokes, output_path, session_name):
             ("Recovery Time (s)", strokes["Recovery Time"], False),
         ]
 
-        page_num = 3
         for title, data, hib in core_pages:
             fig = plt.figure(figsize=(16.5, 11.7))
             fig.patch.set_facecolor("white")
@@ -706,17 +754,6 @@ def generate_pdf(strokes, output_path, session_name):
             print(f"  Page {page_num}: {title}")
             page_num += 1
 
-        # Final page: Experimental Anomaly Report
-        anomalies = _detect_anomalies(strokes, overall_length, effective_length)
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_anomaly_page(fig, anomalies, session_name, strokes)
-        pdf.savefig(fig)
-        plt.close(fig)
-        n_anomalies = len(anomalies)
-        print(f"  Page {page_num}: Experimental Anomaly Report ({n_anomalies} issues)")
-        page_num += 1
-
     print(f"\nPDF saved to {output_path}")
 
 
@@ -733,19 +770,21 @@ def interactive_mode():
     print("Available CSV files:")
     for i, f in enumerate(csvs, 1):
         print(f"  {i}. {f.name}")
+    print(f"  a. All files")
     print()
 
     if len(csvs) == 1:
         csv_path = csvs[0]
         print(f"Using: {csv_path.name}")
-    else:
-        choice = input("Enter CSV number: ").strip()
-        try:
-            csv_path = csvs[int(choice) - 1]
-        except (ValueError, IndexError):
-            sys.exit("Invalid selection")
+        return csv_path
 
-    return csv_path
+    choice = input("Enter CSV number (or 'a' for all): ").strip().lower()
+    if choice == "a":
+        return csvs
+    try:
+        return csvs[int(choice) - 1]
+    except (ValueError, IndexError):
+        sys.exit("Invalid selection")
 
 
 def _process_one(csv_path):
@@ -781,7 +820,13 @@ def main():
         return
 
     if not args.csv:
-        csv_path = interactive_mode()
+        result = interactive_mode()
+        if isinstance(result, list):
+            for csv_path in result:
+                _process_one(csv_path)
+            print(f"\nDone — generated {len(result)} statsheets.")
+            return
+        csv_path = result
     else:
         csv_input = Path(args.csv)
         csv_path = csv_input if csv_input.exists() else DATA_DIR / args.csv

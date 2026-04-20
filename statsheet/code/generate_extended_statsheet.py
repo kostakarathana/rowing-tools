@@ -18,8 +18,11 @@ import csv
 import sys
 import warnings
 import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.inspection import permutation_importance
 warnings.filterwarnings("ignore", message=".*empty slice.*")
 warnings.filterwarnings("ignore", message=".*Degrees of freedom.*")
+warnings.filterwarnings("ignore", message=".*invalid value encountered in divide.*")
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -88,6 +91,7 @@ def parse_csv(csv_path):
     strokes = {name: [] for name in metrics}
     strokes["stroke_num"] = []
     strokes["rating"] = []
+    strokes["boat_speed"] = []
 
     for row in rows[data_start:]:
         if len(row) < 9 or row[0] == "Time":
@@ -101,6 +105,7 @@ def parse_csv(csv_path):
 
         strokes["stroke_num"].append(int(float(row[-4])) if row[-4] else 0)
         strokes["rating"].append(float(row[-6]) if row[-6] else 0.0)
+        strokes["boat_speed"].append(float(row[-5]) if row[-5] else 0.0)
 
     for name in metrics:
         strokes[name] = np.array(strokes[name])
@@ -602,7 +607,7 @@ def _compute_corr_matrix(data, dead):
 
 
 def _draw_correlation_page(fig, strokes, metric_key=None, metric_label=None,
-                           data=None, corr_matrix=None):
+                           data=None, corr_matrix=None, full_matrix=False):
     """Pearson correlation matrix of a metric between all seat pairs.
 
     Can be called with:
@@ -634,10 +639,23 @@ def _draw_correlation_page(fig, strokes, metric_key=None, metric_label=None,
     ax = fig.add_axes([0.15, 0.10, 0.65, 0.75])
 
     cmap = LinearSegmentedColormap.from_list(
-        "corr", ["#3498db", "#ecf0f1", "#27ae60"])
+        "corr", ["#e74c3c", "#27ae60"])
 
-    masked = np.ma.masked_invalid(corr)
-    im = ax.imshow(masked, cmap=cmap, vmin=0, vmax=1, aspect="equal")
+    # Optionally exclude lower triangle for display; always exclude diagonal
+    corr_display = corr.copy()
+    for i in range(n_seats):
+        corr_display[i, i] = np.nan  # always hide diagonal
+    if not full_matrix:
+        for i in range(n_seats):
+            for j in range(n_seats):
+                if j < i:  # lower triangle
+                    corr_display[i, j] = np.nan
+
+    masked = np.ma.masked_invalid(corr_display)
+    valid_vals = corr_display[~np.isnan(corr_display)]
+    vmin = np.min(valid_vals) if len(valid_vals) > 0 else 0
+    vmax = np.max(valid_vals) if len(valid_vals) > 0 else 1
+    im = ax.imshow(masked, cmap=cmap, vmin=vmin, vmax=vmax, aspect="equal")
 
     labels = [_seat_label(i, strokes) for i in range(n_seats)]
     ax.set_xticks(range(n_seats))
@@ -647,6 +665,10 @@ def _draw_correlation_page(fig, strokes, metric_key=None, metric_label=None,
 
     for i in range(n_seats):
         for j in range(n_seats):
+            if i == j:
+                continue
+            if not full_matrix and j < i:
+                continue
             val = corr[i, j]
             if np.isnan(val):
                 ax.text(j, i, "--", ha="center", va="center",
@@ -868,6 +890,192 @@ def _draw_power_efficiency_page(fig, strokes, effective_length):
 
 
 # ---------------------------------------------------------------------------
+# NEW PAGE: Boat Watts vs Boat Speed
+# ---------------------------------------------------------------------------
+
+def _draw_watts_vs_speed_page(fig, strokes):
+    """Scatter + dual-axis time series of total boat watts vs GPS boat speed."""
+    fig.text(0.5, 0.97, "Boat Watts vs Boat Speed",
+             fontsize=16, fontweight="bold", ha="center", family="sans-serif")
+    fig.text(0.5, 0.935,
+             "How does crew power translate to boat speed?",
+             fontsize=10, ha="center", color="#555", family="sans-serif")
+
+    dead = strokes.get("dead_seats", set())
+    live_seats = [s for s in range(8) if s not in dead]
+
+    power = strokes["SwivelPower"]           # (n_strokes, 8)
+    speed = np.array(strokes["boat_speed"])  # (n_strokes,)
+
+    # Total boat watts = sum of live seats
+    boat_watts = np.nansum(power[:, live_seats], axis=1)
+
+    n_strokes = len(speed)
+    x = np.arange(n_strokes)
+
+    # Filter valid (both speed > 0 and watts > 0), exclude first 20 strokes
+    valid = (speed > 0) & (~np.isnan(boat_watts)) & (boat_watts > 0)
+    valid[:20] = False
+
+    # ---- Top: Scatter plot of boat watts vs speed ----
+    ax1 = fig.add_axes([0.08, 0.55, 0.84, 0.33])
+
+    if valid.sum() >= 3:
+        sv, wv = speed[valid], boat_watts[valid]
+        r = np.corrcoef(sv, wv)[0, 1]
+
+        ax1.scatter(wv, sv, s=20, alpha=0.5, color="#2c3e50", edgecolors="none")
+
+        # Trend line
+        z = np.polyfit(wv, sv, 1)
+        p = np.poly1d(z)
+        x_line = np.linspace(np.min(wv), np.max(wv), 50)
+        ax1.plot(x_line, p(x_line), color="#e74c3c", linewidth=2, alpha=0.8)
+
+        ax1.set_title(f"r = {r:.3f}   |   {valid.sum()} strokes",
+                      fontsize=11, fontweight="bold")
+    else:
+        ax1.text(0.5, 0.5, "INSUFFICIENT DATA", transform=ax1.transAxes,
+                 ha="center", va="center", fontsize=14, color="#ccc",
+                 fontweight="bold")
+
+    ax1.set_xlabel("Boat Watts (sum of crew)", fontsize=10)
+    ax1.set_ylabel("Boat Speed (m/s)", fontsize=10)
+    ax1.grid(alpha=0.2)
+    ax1.tick_params(labelsize=9)
+
+    # ---- Bottom: Dual-axis time series (excluding first 20 strokes) ----
+    ax2 = fig.add_axes([0.08, 0.08, 0.84, 0.38])
+    x_plot = x[20:]
+    watts_smooth = _smooth(boat_watts)[20:]
+    speed_smooth = _smooth(speed)[20:]
+
+    color_watts = "#2c3e50"
+    color_speed = "#e74c3c"
+
+    ax2.plot(x_plot, watts_smooth, color=color_watts, linewidth=1.8, label="Boat Watts")
+    ax2.set_xlabel("Stroke", fontsize=10)
+    ax2.set_ylabel("Boat Watts", fontsize=10, color=color_watts)
+    ax2.tick_params(axis="y", labelcolor=color_watts, labelsize=8)
+    ax2.tick_params(axis="x", labelsize=8)
+    ax2.grid(alpha=0.2)
+
+    ax3 = ax2.twinx()
+    ax3.plot(x_plot, speed_smooth, color=color_speed, linewidth=1.8, label="Boat Speed")
+    ax3.set_ylabel("Boat Speed (m/s)", fontsize=10, color=color_speed)
+    ax3.tick_params(axis="y", labelcolor=color_speed, labelsize=8)
+
+    # Combined legend
+    lines1, labels1 = ax2.get_legend_handles_labels()
+    lines2, labels2 = ax3.get_legend_handles_labels()
+    ax2.legend(lines1 + lines2, labels1 + labels2, fontsize=9, loc="upper right")
+
+    ax2.set_title("Watts and Speed over the piece (smoothed)",
+                  fontsize=10, fontweight="bold")
+
+
+# ---------------------------------------------------------------------------
+# NEW PAGE: Catch vs Finish Spread
+# ---------------------------------------------------------------------------
+
+def _draw_catch_finish_spread_page(fig, strokes):
+    """Compare crew spread at catch vs finish.
+
+    Catch = Drive Start T offset from stroke seat.
+    Finish = (Drive Start T + Drive Time) offset from stroke seat's finish.
+    If the crew is tight at catch but loose at finish (or vice versa), this
+    shows which end of the stroke needs work.
+    """
+    fig.text(0.5, 0.97, "Catch vs Finish Timing Spread",
+             fontsize=16, fontweight="bold", ha="center", family="sans-serif")
+    fig.text(0.5, 0.935,
+             "Crew spread (std of offsets from stroke seat) at catch and finish  |  "
+             "Lower = tighter",
+             fontsize=10, ha="center", color="#555", family="sans-serif")
+
+    dead = strokes.get("dead_seats", set())
+    live_seats = [s for s in range(8) if s not in dead]
+
+    dst = strokes["Drive Start T"]       # (n_strokes, 8)
+    drive = strokes["Drive Time"]        # (n_strokes, 8)
+
+    # Catch offset from stroke seat
+    catch_ref = dst[:, 7]
+    catch_offsets = dst - catch_ref[:, np.newaxis]  # (n_strokes, 8)
+
+    # Finish time = Drive Start T + Drive Time; offset from stroke seat's finish
+    finish_times = dst + drive
+    finish_ref = finish_times[:, 7]
+    finish_offsets = finish_times - finish_ref[:, np.newaxis]  # (n_strokes, 8)
+
+    n_strokes = dst.shape[0]
+    x = np.arange(n_strokes)
+
+    # Per-stroke crew spread (std across live seats)
+    catch_spread = np.nanstd(catch_offsets[:, live_seats], axis=1)
+    finish_spread = np.nanstd(finish_offsets[:, live_seats], axis=1)
+
+    # ---- Top plot: crew spread over the piece ----
+    ax1 = fig.add_axes([0.08, 0.55, 0.84, 0.32])
+    catch_smooth = _smooth(catch_spread)
+    finish_smooth = _smooth(finish_spread)
+
+    ax1.plot(x, catch_smooth, color="#3498db", linewidth=2, label="Catch spread")
+    ax1.plot(x, finish_smooth, color="#e74c3c", linewidth=2, label="Finish spread")
+    ax1.fill_between(x, catch_smooth, finish_smooth,
+                     where=finish_smooth > catch_smooth,
+                     color="#e74c3c", alpha=0.1, interpolate=True)
+    ax1.fill_between(x, catch_smooth, finish_smooth,
+                     where=catch_smooth > finish_smooth,
+                     color="#3498db", alpha=0.1, interpolate=True)
+    ax1.set_ylabel("Crew spread (ms std)", fontsize=10)
+    ax1.set_xlabel("Stroke", fontsize=9)
+    ax1.legend(fontsize=9, loc="upper right")
+    ax1.grid(alpha=0.2)
+    ax1.tick_params(labelsize=8)
+
+    avg_catch_spread = np.nanmean(catch_spread)
+    avg_finish_spread = np.nanmean(finish_spread)
+    worse_end = "FINISH" if avg_finish_spread > avg_catch_spread else "CATCH"
+    ax1.set_title(
+        f"Avg catch spread: {avg_catch_spread:.1f}ms   |   "
+        f"Avg finish spread: {avg_finish_spread:.1f}ms   |   "
+        f"Looser end: {worse_end}",
+        fontsize=10, fontweight="bold")
+
+    # ---- Bottom plot: per-rower catch vs finish avg offset ----
+    ax2 = fig.add_axes([0.08, 0.08, 0.84, 0.38])
+
+    bar_width = 0.35
+    seats_to_plot = [s for s in live_seats]
+    x_bars = np.arange(len(seats_to_plot))
+
+    catch_avgs = [np.nanmean(catch_offsets[:, s]) for s in seats_to_plot]
+    finish_avgs = [np.nanmean(finish_offsets[:, s]) for s in seats_to_plot]
+    catch_stds = [np.nanstd(catch_offsets[:, s]) for s in seats_to_plot]
+    finish_stds = [np.nanstd(finish_offsets[:, s]) for s in seats_to_plot]
+
+    ax2.bar(x_bars - bar_width / 2, catch_avgs, bar_width,
+            yerr=catch_stds, capsize=3,
+            color="#3498db", alpha=0.8, label="Catch offset", edgecolor="white")
+    ax2.bar(x_bars + bar_width / 2, finish_avgs, bar_width,
+            yerr=finish_stds, capsize=3,
+            color="#e74c3c", alpha=0.8, label="Finish offset", edgecolor="white")
+
+    ax2.set_xticks(x_bars)
+    ax2.set_xticklabels([_seat_label(s, strokes) for s in seats_to_plot],
+                        fontsize=9)
+    ax2.axhline(0, color="#aaa", linewidth=0.8, linestyle="--")
+    ax2.set_ylabel("Avg offset from stroke seat (ms)", fontsize=9)
+    ax2.set_title("Per-rower: avg catch & finish offset  |  "
+                  "Positive = late, Negative = early",
+                  fontsize=10, fontweight="bold")
+    ax2.legend(fontsize=9, loc="upper right")
+    ax2.grid(axis="y", alpha=0.2)
+    ax2.tick_params(labelsize=8)
+
+
+# ---------------------------------------------------------------------------
 # NEW PAGE: Stroke Heatmap
 # ---------------------------------------------------------------------------
 
@@ -876,7 +1084,7 @@ def _draw_stroke_heatmap_page(fig, strokes):
     fig.text(0.5, 0.97, "Stroke Power Heatmap",
              fontsize=16, fontweight="bold", ha="center", family="sans-serif")
     fig.text(0.5, 0.935,
-             "SwivelPower by stroke and seat  |  Darker = more power",
+             "SwivelPower by stroke and seat  |  Blue = low, Green = high",
              fontsize=10, ha="center", color="#555", family="sans-serif")
 
     dead = strokes.get("dead_seats", set())
@@ -885,12 +1093,15 @@ def _draw_stroke_heatmap_page(fig, strokes):
     ax = fig.add_axes([0.08, 0.10, 0.82, 0.78])
 
     cmap = LinearSegmentedColormap.from_list(
-        "heat", ["#1a1a2e", "#16213e", "#0f3460", "#3498db", "#2ecc71", "#f1c40f", "#e74c3c"])
+        "heat", ["#e74c3c", "#27ae60"])
 
     # Transpose so seats are rows, strokes are columns
     data = power.T  # (8, n_strokes)
 
-    im = ax.imshow(data, aspect="auto", cmap=cmap, interpolation="nearest")
+    vmin = np.nanmin(data)
+    vmax = np.nanmax(data)
+    im = ax.imshow(data, aspect="auto", cmap=cmap, interpolation="nearest",
+                   vmin=vmin, vmax=vmax)
 
     ax.set_yticks(range(8))
     ylabels = []
@@ -1330,6 +1541,11 @@ def _detect_anomalies(strokes, overall_length, effective_length):
         label = _seat_label(seat, strokes) if seat is not None else "Crew"
         anomalies.append((severity, seat, label, desc))
 
+    power = strokes["SwivelPower"]
+    n = power.shape[0]
+    q1_end = n // 4
+    q4_start = n - n // 4
+
     # 1. High variance: seat std > 1.8× crew-average std for key metrics
     variance_checks = [
         ("Avg Watts", strokes["SwivelPower"]),
@@ -1344,24 +1560,20 @@ def _detect_anomalies(strokes, overall_length, effective_length):
             if crew_avg_std > 0 and stds[s] > 1.8 * crew_avg_std:
                 ratio = stds[s] / crew_avg_std
                 _add("HIGH", s,
-                     f"{name} variance is {ratio:.1f}× the crew average "
-                     f"(std {stds[s]:.1f} vs crew avg std {crew_avg_std:.1f})")
+                     f"{name} variance {ratio:.1f}× crew avg "
+                     f"(std {stds[s]:.1f} vs {crew_avg_std:.1f})")
 
-    # 2. Power fade: last-quarter avg power < first-quarter by >12%
-    power = strokes["SwivelPower"]
-    n = power.shape[0]
-    q1_end = n // 4
-    q4_start = n - n // 4
+    # 2. Power fade: last-quarter avg power < first-quarter by >40%
     if q1_end > 2 and (n - q4_start) > 2:
         for s in live_seats:
             first_q = np.nanmean(power[:q1_end, s])
             last_q = np.nanmean(power[q4_start:, s])
             if first_q > 0:
                 drop_pct = (first_q - last_q) / first_q * 100
-                if drop_pct > 12:
-                    sev = "HIGH" if drop_pct > 20 else "MED"
+                if drop_pct > 40:
+                    sev = "HIGH" if drop_pct > 50 else "MED"
                     _add(sev, s,
-                         f"Power faded {drop_pct:.0f}% from first to last quarter "
+                         f"Power faded {drop_pct:.0f}% "
                          f"({first_q:.0f}W → {last_q:.0f}W)")
 
     # 3. Excessive slip: seat avg catch/finish slip > 1.5× crew average
@@ -1373,8 +1585,8 @@ def _detect_anomalies(strokes, overall_length, effective_length):
         for s in live_seats:
             if crew_avg > 0 and avgs[s] > 1.5 * crew_avg:
                 _add("MED", s,
-                     f"{slip_name} avg {avgs[s]:.1f}° is {avgs[s]/crew_avg:.1f}× "
-                     f"the crew average ({crew_avg:.1f}°)")
+                     f"{slip_name} {avgs[s]:.1f}° is {avgs[s]/crew_avg:.1f}× "
+                     f"crew avg ({crew_avg:.1f}°)")
 
     # 4. Low power outlier: seat avg watts > 1.5 std devs below crew mean
     power_avgs = np.array([np.nanmean(power[:, s]) for s in range(8)])
@@ -1385,7 +1597,7 @@ def _detect_anomalies(strokes, overall_length, effective_length):
             z = (power_avgs[s] - crew_mean) / crew_std
             if z < -1.5:
                 _add("MED", s,
-                     f"Avg power {power_avgs[s]:.0f}W is {abs(z):.1f} std devs "
+                     f"Avg power {power_avgs[s]:.0f}W is {abs(z):.1f}σ "
                      f"below crew mean ({crew_mean:.0f}W)")
 
     # 5. Timing consistency: drive start time std much higher than crew avg
@@ -1396,8 +1608,8 @@ def _detect_anomalies(strokes, overall_length, effective_length):
         for s in live_seats:
             if dst_stds[s] > 1.8 * crew_dst_std:
                 _add("MED", s,
-                     f"Timing variability is {dst_stds[s]/crew_dst_std:.1f}× "
-                     f"the crew average (inconsistent catch timing)")
+                     f"Timing variability {dst_stds[s]/crew_dst_std:.1f}× "
+                     f"crew avg (inconsistent catch)")
 
     # 6. Effective length fade
     if q1_end > 2 and (n - q4_start) > 2:
@@ -1408,8 +1620,20 @@ def _detect_anomalies(strokes, overall_length, effective_length):
                 drop_pct = (first_q - last_q) / first_q * 100
                 if drop_pct > 8:
                     _add("LOW", s,
-                         f"Effective length shortened {drop_pct:.0f}% from first "
-                         f"to last quarter ({first_q:.1f}° → {last_q:.1f}°)")
+                         f"Eff. length shortened {drop_pct:.0f}% "
+                         f"({first_q:.1f}° → {last_q:.1f}°)")
+
+    # 7. Short effective arc: seat avg eff length > 1.5σ below crew mean
+    eff_avgs = np.array([np.nanmean(effective_length[:, s]) for s in range(8)])
+    eff_crew_mean = np.nanmean(eff_avgs[live_seats])
+    eff_crew_std = np.nanstd(eff_avgs[live_seats])
+    if eff_crew_std > 0:
+        for s in live_seats:
+            z = (eff_avgs[s] - eff_crew_mean) / eff_crew_std
+            if z < -1.5:
+                _add("MED", s,
+                     f"Short arc — eff. length {eff_avgs[s]:.1f}° is "
+                     f"{abs(z):.1f}σ below crew ({eff_crew_mean:.1f}°)")
 
     # Sort: HIGH first, then MED, then LOW
     order = {"HIGH": 0, "MED": 1, "LOW": 2}
@@ -1418,15 +1642,10 @@ def _detect_anomalies(strokes, overall_length, effective_length):
 
 
 def _draw_anomaly_page(fig, anomalies, session_name, strokes):
-    """Final page: Experimental Anomaly Report — 8 boxes grouped by rower."""
-    fig.text(0.5, 0.97, f"Experimental Anomaly Report — {session_name}",
+    """Anomaly Report — clean table with one row per rower, issues listed."""
+    fig.text(0.5, 0.97, f"Anomaly Report — {session_name}",
              fontsize=18, fontweight="bold", ha="center", va="top",
              family="sans-serif", color="#2c3e50")
-    fig.text(0.5, 0.935,
-             "Automatically detected issues grouped by rower  |  "
-             "HIGH = red   MED = orange   LOW = blue",
-             fontsize=9, ha="center", va="top", color="#555",
-             family="sans-serif")
 
     dead = strokes.get("dead_seats", set())
 
@@ -1442,71 +1661,310 @@ def _draw_anomaly_page(fig, anomalies, session_name, strokes):
         if seat_idx is not None:
             seat_anomalies[seat_idx].append((sev, desc))
 
-    gs = fig.add_gridspec(4, 2, hspace=0.3, wspace=0.15,
-                          left=0.04, right=0.96, top=0.90, bottom=0.03)
+    ax = fig.add_axes([0.03, 0.04, 0.94, 0.88])
+    ax.axis("off")
+
+    # Build table data: Name | Status | Issues
+    col_labels = ["Name", "Status", "Issues"]
+    cell_data = []
+    cell_colors = []
 
     for seat in range(8):
-        row, col = divmod(seat, 2)
-        ax = fig.add_subplot(gs[row, col])
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.axis("off")
-
         name = _seat_label(seat, strokes)
-
         if seat in dead:
-            ax.set_facecolor("#f5f5f5")
-            ax.text(0.5, 0.5, f"{name}\nNO DATA", ha="center", va="center",
-                    fontsize=11, color="#ccc", fontweight="bold",
-                    family="sans-serif")
-            for spine in ax.spines.values():
-                spine.set_visible(True)
-                spine.set_color("#ddd")
+            cell_data.append([name, "NO DATA", "—"])
+            cell_colors.append(["#d5d5d5", "#d5d5d5", "#d5d5d5"])
             continue
 
         items = seat_anomalies.get(seat, [])
-
-        # Draw border — color based on worst severity
-        border_color = "#2ecc71"  # green = clean
-        if items:
-            if any(s == "HIGH" for s, _ in items):
-                border_color = "#e74c3c"
-            elif any(s == "MED" for s, _ in items):
-                border_color = "#f39c12"
-            else:
-                border_color = "#3498db"
-
-        for spine in ax.spines.values():
-            spine.set_visible(True)
-            spine.set_color(border_color)
-            spine.set_linewidth(2.5)
-
-        # Header
-        ax.text(0.5, 0.92, name, ha="center", va="top",
-                fontsize=12, fontweight="bold", color=SEAT_COLORS[seat],
-                family="sans-serif")
-
         if not items:
-            ax.text(0.5, 0.45, "No issues detected", ha="center", va="center",
-                    fontsize=10, color="#2ecc71", fontstyle="italic",
-                    family="sans-serif")
+            cell_data.append([name, "CLEAN", "No issues detected"])
+            cell_colors.append(["#eafaf1", "#eafaf1", "#eafaf1"])
         else:
-            y_pos = 0.78
-            line_step = 0.78 / max(len(items), 1)
-            line_step = min(line_step, 0.16)
+            # Worst severity determines row color
+            if any(s == "HIGH" for s, _ in items):
+                status = f"{len(items)} issue{'s' if len(items) > 1 else ''}"
+                row_bg = "#fdedec"
+            elif any(s == "MED" for s, _ in items):
+                status = f"{len(items)} issue{'s' if len(items) > 1 else ''}"
+                row_bg = "#fef9e7"
+            else:
+                status = f"{len(items)} issue{'s' if len(items) > 1 else ''}"
+                row_bg = "#ebf5fb"
+
+            # Join issues with severity tags
+            issue_lines = []
             for sev, desc in items:
-                marker_color = SEV_COLORS[sev]
-                ax.plot(0.03, y_pos, "s", color=marker_color, markersize=6,
-                        transform=ax.transData, clip_on=False)
-                ax.text(0.07, y_pos, f"[{sev}] {desc}", ha="left", va="center",
-                        fontsize=7, color="#333", family="sans-serif",
-                        wrap=True)
-                y_pos -= line_step
+                issue_lines.append(f"[{sev}] {desc}")
+            issues_text = "  |  ".join(issue_lines)
+
+            cell_data.append([name, status, issues_text])
+            cell_colors.append([row_bg, row_bg, row_bg])
+
+    table = ax.table(
+        cellText=cell_data,
+        colLabels=col_labels,
+        loc="upper center",
+        cellLoc="left",
+        colWidths=[0.10, 0.08, 0.82],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 3.0)
+
+    # Style header
+    for j in range(3):
+        cell = table[0, j]
+        cell.set_facecolor("#2c3e50")
+        cell.set_text_props(color="white", fontweight="bold", fontsize=9)
+
+    # Style rows
+    for i in range(8):
+        for j in range(3):
+            cell = table[i + 1, j]
+            cell.set_facecolor(cell_colors[i][j])
+            if j == 0:
+                cell.set_text_props(fontweight="bold",
+                                    color=SEAT_COLORS[i] if i not in dead else "#999")
+            elif j == 1:
+                seat_items = seat_anomalies.get(i, [])
+                if i in dead:
+                    cell.set_text_props(color="#999")
+                elif not seat_items:
+                    cell.set_text_props(color="#27ae60", fontweight="bold")
+                elif any(s == "HIGH" for s, _ in seat_items):
+                    cell.set_text_props(color="#e74c3c", fontweight="bold")
+                elif any(s == "MED" for s, _ in seat_items):
+                    cell.set_text_props(color="#f39c12", fontweight="bold")
+                else:
+                    cell.set_text_props(color="#3498db", fontweight="bold")
+            elif j == 2:
+                cell.set_text_props(fontsize=7)
+
+    # Summary count at bottom
+    n_high = sum(1 for s, _, _, _ in anomalies if s == "HIGH")
+    n_med = sum(1 for s, _, _, _ in anomalies if s == "MED")
+    n_low = sum(1 for s, _, _, _ in anomalies if s == "LOW")
+    clean_count = sum(1 for s in range(8)
+                      if s not in dead and not seat_anomalies.get(s, []))
+    fig.text(0.5, 0.935,
+             f"{len(anomalies)} total issues  |  "
+             f"{n_high} HIGH  •  {n_med} MED  •  {n_low} LOW  |  "
+             f"{clean_count} clean rowers",
+             fontsize=10, ha="center", va="top", color="#555",
+             family="sans-serif")
 
 
 # ---------------------------------------------------------------------------
 # PDF generation
 # ---------------------------------------------------------------------------
+
+# Readable short labels for metrics used in speed factor analysis
+_SPEED_METRIC_CONFIGS = [
+    ("Power", "SwivelPower"),
+    ("Catch Slip", "CatchSlip"),
+    ("Finish Slip", "FinishSlip"),
+    ("Timing", "Drive Start T"),
+    ("Max Force Angle", "Angle Max F"),
+    ("Work Q1", "Work PC Q1"),
+    ("Work Q2", "Work PC Q2"),
+    ("Work Q3", "Work PC Q3"),
+    ("Work Q4", "Work PC Q4"),
+]
+
+
+def _compute_speed_factors(strokes, overall_length, effective_length):
+    """Identify which per-rower technique metrics influence boat speed.
+
+    First regresses out stroke rate from boat speed so that rate-dependent
+    metrics (drive time, recovery time) don't dominate.  Then trains a
+    Random Forest on technique features to predict the *rate-adjusted*
+    speed residual, and uses permutation importance to rank features.
+
+    Returns a dict with 'factors', 'model_score', 'rate_r2', 'n_samples',
+    or None if there is insufficient data.
+    """
+    dead = strokes.get("dead_seats", set())
+    live_seats = [s for s in range(8) if s not in dead]
+    speed = np.array(strokes["boat_speed"])
+    rate = np.array(strokes["rating"])
+
+    # Build feature matrix — technique metrics only -----------------------
+    metric_pairs = [(label, strokes[key]) for label, key in _SPEED_METRIC_CONFIGS]
+    metric_pairs.append(("Eff. Length", effective_length))
+    metric_pairs.append(("Overall Length", overall_length))
+
+    feature_names = []  # list of (seat_index, metric_label)
+    feature_cols = []
+    for label, data in metric_pairs:
+        for s in live_seats:
+            feature_names.append((s, label))
+            feature_cols.append(data[:, s])
+
+    X = np.column_stack(feature_cols)
+    y = speed
+
+    # Filter: skip first 20 strokes, require speed > 0, no NaN rows ------
+    valid = np.ones(len(y), dtype=bool)
+    valid[:20] = False
+    valid &= (y > 0) & (rate > 0)
+    valid &= ~np.any(np.isnan(X), axis=1)
+
+    X_valid = X[valid]
+    y_valid = y[valid]
+    rate_valid = rate[valid]
+
+    if len(y_valid) < 40:
+        return None
+
+    # --- Regress out stroke rate from speed -------------------------------
+    # Fit a degree-2 polynomial (speed ~ rate + rate²) and use residuals
+    rate_coeffs = np.polyfit(rate_valid, y_valid, 2)
+    rate_predicted = np.polyval(rate_coeffs, rate_valid)
+    y_residual = y_valid - rate_predicted
+    ss_tot = np.sum((y_valid - np.mean(y_valid)) ** 2)
+    ss_res = np.sum((y_valid - rate_predicted) ** 2)
+    rate_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    # --- Random Forest on residuals + permutation importance --------------
+    rf = RandomForestRegressor(
+        n_estimators=200, max_depth=4, min_samples_leaf=5,
+        random_state=42, n_jobs=-1,
+    )
+    rf.fit(X_valid, y_residual)
+    perm = permutation_importance(
+        rf, X_valid, y_residual, n_repeats=30, random_state=42, n_jobs=-1,
+    )
+    importances = perm.importances_mean
+
+    # --- Delta correlations (direction of effect) ------------------------
+    # Δmetric vs Δresidual, stroke-to-stroke
+    delta_corrs = []
+    for i in range(X_valid.shape[1]):
+        dx = np.diff(X_valid[:, i])
+        dy = np.diff(y_residual)
+        mask = ~(np.isnan(dx) | np.isnan(dy))
+        if mask.sum() > 10:
+            r = np.corrcoef(dx[mask], dy[mask])[0, 1]
+        else:
+            r = 0.0
+        delta_corrs.append(r)
+
+    # Partial correlation with residual for overall direction
+    raw_corrs = []
+    for i in range(X_valid.shape[1]):
+        r = np.corrcoef(X_valid[:, i], y_residual)[0, 1]
+        raw_corrs.append(r if not np.isnan(r) else 0.0)
+
+    # Assemble results ----------------------------------------------------
+    factors = []
+    for i, (seat, metric) in enumerate(feature_names):
+        factors.append({
+            "seat": seat,
+            "metric": metric,
+            "importance": importances[i],
+            "delta_r": delta_corrs[i],
+            "raw_r": raw_corrs[i],
+        })
+
+    factors.sort(key=lambda x: -x["importance"])
+
+    return {
+        "factors": factors,
+        "model_score": rf.score(X_valid, y_residual),
+        "rate_r2": rate_r2,
+        "n_samples": len(y_valid),
+    }
+
+
+def _draw_speed_factors_overview(fig, strokes, speed_data):
+    """Page 1: top speed factors bar chart + per-rower summary table."""
+    fig.text(0.5, 0.97, "Speed Factor Analysis",
+             fontsize=18, fontweight="bold", ha="center", va="top",
+             family="sans-serif", color="#2c3e50")
+    rate_r2 = speed_data.get("rate_r2", 0)
+    fig.text(0.5, 0.94,
+             "Rate-adjusted: technique factors that predict speed beyond stroke rate  "
+             f"(rate R\u00b2 = {rate_r2:.2f}, "
+             f"technique R\u00b2 = {speed_data['model_score']:.2f}, "
+             f"n = {speed_data['n_samples']})",
+             fontsize=10, ha="center", color="#555", family="sans-serif")
+
+    dead = strokes.get("dead_seats", set())
+    live_seats = [s for s in range(8) if s not in dead]
+    factors = speed_data["factors"]
+
+    # --- Top bar chart: top 15 factors -----------------------------------
+    ax = fig.add_axes([0.30, 0.42, 0.65, 0.50])
+    top_n = min(15, len(factors))
+    top = factors[:top_n][::-1]  # reverse for horizontal bars (top at top)
+
+    bars_y = np.arange(top_n)
+    bars_vals = [f["importance"] for f in top]
+    bars_colors = [SEAT_COLORS[f["seat"]] for f in top]
+    bar_labels = []
+    for f in top:
+        name = _seat_label(f["seat"], strokes)
+        arrow = "\u2191" if f["raw_r"] > 0 else "\u2193"
+        bar_labels.append(f"{name} — {f['metric']}  {arrow}")
+
+    ax.barh(bars_y, bars_vals, color=bars_colors, edgecolor="white",
+            height=0.7, alpha=0.85)
+    ax.set_yticks(bars_y)
+    ax.set_yticklabels(bar_labels, fontsize=8, family="sans-serif")
+    ax.set_xlabel("Permutation Importance", fontsize=9)
+    ax.set_title("Top Technique Factors — Rate-Adjusted (Random Forest)",
+                 fontsize=11, fontweight="bold")
+    ax.grid(axis="x", alpha=0.2)
+    ax.tick_params(labelsize=8)
+
+    # Add delta-r annotation on each bar
+    for j, f in enumerate(top):
+        x_pos = f["importance"] + max(bars_vals) * 0.01
+        dr = f["delta_r"]
+        ax.text(x_pos, j, f"Δr={dr:+.2f}", fontsize=6.5, va="center",
+                color="#555")
+
+    # --- Bottom: per-rower summary table ---------------------------------
+    # For each live seat, find their #1 factor
+    ax2 = fig.add_axes([0.05, 0.04, 0.90, 0.33])
+    ax2.axis("off")
+
+    col_labels = ["Seat", "Name", "#1 Factor", "Direction", "Importance",
+                   "#2 Factor", "Direction", "Importance"]
+    table_data = []
+
+    for s in live_seats:
+        seat_factors = [f for f in factors if f["seat"] == s]
+        name = _seat_label(s, strokes)
+        row = [f"Seat {s+1}", name]
+        for rank in range(2):
+            if rank < len(seat_factors):
+                sf = seat_factors[rank]
+                arrow = "\u2191 more → faster" if sf["raw_r"] > 0 else "\u2193 less → faster"
+                row.extend([sf["metric"], arrow, f"{sf['importance']:.4f}"])
+            else:
+                row.extend(["—", "—", "—"])
+        table_data.append(row)
+
+    table = ax2.table(cellText=table_data, colLabels=col_labels,
+                      cellLoc="center", loc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(7.5)
+    table.scale(1.0, 1.6)
+
+    # Style header
+    for j in range(len(col_labels)):
+        cell = table[0, j]
+        cell.set_facecolor("#2c3e50")
+        cell.set_text_props(color="white", fontweight="bold")
+
+    # Color-code rows by seat
+    for i, s in enumerate(live_seats):
+        for j in range(len(col_labels)):
+            cell = table[i + 1, j]
+            cell.set_facecolor(SEAT_COLORS[s] + "18")  # very light tint
+
 
 def generate_pdf(strokes, output_path, session_name):
     n_strokes = len(strokes["stroke_num"])
@@ -1526,7 +1984,18 @@ def generate_pdf(strokes, output_path, session_name):
         print(f"  Page {page_num}: Summary table")
         page_num += 1
 
-        # Page 2: Angle arc plot
+        # Page 2: Anomaly Report
+        anomalies = _detect_anomalies(strokes, overall_length, effective_length)
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_anomaly_page(fig, anomalies, session_name, strokes)
+        pdf.savefig(fig)
+        plt.close(fig)
+        n_anomalies = len(anomalies)
+        print(f"  Page {page_num}: Anomaly Report ({n_anomalies} issues)")
+        page_num += 1
+
+        # Angle arc plot
         fig = plt.figure(figsize=(16.5, 11.7))
         fig.patch.set_facecolor("white")
         _draw_angle_page(fig, strokes)
@@ -1645,17 +2114,6 @@ def generate_pdf(strokes, output_path, session_name):
         print(f"  Page {page_num}: Rate Response Curves")
         page_num += 1
 
-        # Anomaly Report
-        anomalies = _detect_anomalies(strokes, overall_length, effective_length)
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_anomaly_page(fig, anomalies, session_name, strokes)
-        pdf.savefig(fig)
-        plt.close(fig)
-        n_anomalies = len(anomalies)
-        print(f"  Page {page_num}: Experimental Anomaly Report ({n_anomalies} issues)")
-        page_num += 1
-
         # ---------------------------------------------------------------
         # Breaker page: Heatmaps
         # ---------------------------------------------------------------
@@ -1669,15 +2127,6 @@ def generate_pdf(strokes, output_path, session_name):
         print(f"  Page {page_num}: --- Heatmaps ---")
         page_num += 1
 
-        # Stroke Power Heatmap
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_stroke_heatmap_page(fig, strokes)
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: Stroke Power Heatmap")
-        page_num += 1
-
         # Watts correlation heatmap
         dead = strokes.get("dead_seats", set())
         watts_corr = _compute_corr_matrix(strokes["SwivelPower"], dead)
@@ -1686,11 +2135,67 @@ def generate_pdf(strokes, output_path, session_name):
         fig.patch.set_facecolor("white")
         _draw_correlation_page(fig, strokes,
                                metric_label="Swivel Power (watts)",
-                               corr_matrix=watts_corr)
+                               corr_matrix=watts_corr,
+                               full_matrix=True)
         pdf.savefig(fig)
         plt.close(fig)
         print(f"  Page {page_num}: Correlation — Watts")
         page_num += 1
+
+        # Timing offset correlation heatmap
+        # Correlate raw Drive Start T (Pearson r is shift-invariant, so
+        # subtracting stroke seat doesn't change pairwise correlations,
+        # but using raw values lets us include stroke seat itself)
+        timing_corr = _compute_corr_matrix(strokes["Drive Start T"], dead)
+
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_correlation_page(fig, strokes,
+                               metric_label="Timing Offset vs Stroke Seat",
+                               corr_matrix=timing_corr)
+        pdf.savefig(fig)
+        plt.close(fig)
+        print(f"  Page {page_num}: Correlation — Timing Offset")
+        page_num += 1
+
+        # Boat Watts vs Boat Speed
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.patch.set_facecolor("white")
+        _draw_watts_vs_speed_page(fig, strokes)
+        pdf.savefig(fig)
+        plt.close(fig)
+        print(f"  Page {page_num}: Boat Watts vs Boat Speed")
+        page_num += 1
+
+        # Speed Factor Analysis (ML)
+        speed_data = _compute_speed_factors(strokes, overall_length,
+                                            effective_length)
+        if speed_data is not None:
+            # Breaker page
+            fig = plt.figure(figsize=(16.5, 11.7))
+            fig.patch.set_facecolor("white")
+            fig.text(0.5, 0.5, "Speed Factor Analysis", fontsize=36,
+                     fontweight="bold", ha="center", va="center",
+                     color="#2c3e50", family="sans-serif")
+            fig.text(0.5, 0.42,
+                     "ML-identified individual metrics that predict boat speed",
+                     fontsize=14, ha="center", color="#555",
+                     family="sans-serif")
+            pdf.savefig(fig)
+            plt.close(fig)
+            print(f"  Page {page_num}: --- Speed Factor Analysis ---")
+            page_num += 1
+
+            # Overview page
+            fig = plt.figure(figsize=(16.5, 11.7))
+            fig.patch.set_facecolor("white")
+            _draw_speed_factors_overview(fig, strokes, speed_data)
+            pdf.savefig(fig)
+            plt.close(fig)
+            print(f"  Page {page_num}: Speed Factors — Overview")
+            page_num += 1
+        else:
+            print("  Skipped Speed Factor Analysis (insufficient data)")
 
     print(f"\nPDF saved to {output_path}")
 
@@ -1712,19 +2217,21 @@ def interactive_mode():
     print("Available CSV files:")
     for i, f in enumerate(csvs, 1):
         print(f"  {i}. {f.name}")
+    print(f"  a. All files")
     print()
 
     if len(csvs) == 1:
         csv_path = csvs[0]
         print(f"Using: {csv_path.name}")
-    else:
-        choice = input("Enter CSV number: ").strip()
-        try:
-            csv_path = csvs[int(choice) - 1]
-        except (ValueError, IndexError):
-            sys.exit("Invalid selection")
+        return csv_path
 
-    return csv_path
+    choice = input("Enter CSV number (or 'a' for all): ").strip().lower()
+    if choice == "a":
+        return csvs
+    try:
+        return csvs[int(choice) - 1]
+    except (ValueError, IndexError):
+        sys.exit("Invalid selection")
 
 
 def _process_one(csv_path):
@@ -1761,7 +2268,13 @@ def main():
         return
 
     if not args.csv:
-        csv_path = interactive_mode()
+        result = interactive_mode()
+        if isinstance(result, list):
+            for csv_path in result:
+                _process_one(csv_path)
+            print(f"\nDone — generated {len(result)} extended statsheets.")
+            return
+        csv_path = result
     else:
         csv_input = Path(args.csv)
         csv_path = csv_input if csv_input.exists() else DATA_DIR / args.csv
