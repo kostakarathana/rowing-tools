@@ -119,7 +119,7 @@ def parse_csv(csv_path):
         if r < len(rows) and len(rows[r]) > 13 and rows[r][13].strip():
             seat_names.append(rows[r][13].strip())
         else:
-            seat_names.append(f"Seat {r + 1}" if r < 8 else "Cox")
+                seat_names.append(f"Rower {r + 1}" if r < 8 else "Cox")
     strokes["seat_names"] = seat_names  # 0-7 = seats, 8 = cox
 
     return strokes
@@ -174,8 +174,8 @@ def _detect_dead_seats(strokes, metric_names):
             dead.add(seat)
 
     if dead:
-        seat_names = ", ".join(f"Seat {s + 1}" for s in sorted(dead))
-        print(f"  Dead seats (no data): {seat_names}")
+        rower_names = ", ".join(f"Rower {s + 1}" for s in sorted(dead))
+        print(f"  Dead rowers (no data): {rower_names}")
         for name in metric_names:
             for seat in dead:
                 strokes[name][:, seat] = np.nan
@@ -184,11 +184,11 @@ def _detect_dead_seats(strokes, metric_names):
 
 
 def _seat_label(seat, strokes):
-    """Return the rower name for a seat index, falling back to 'Seat N'."""
+    """Return the rower name for a seat index, falling back to 'Rower N'."""
     names = strokes.get("seat_names", [])
     if seat < len(names):
         return names[seat]
-    return f"Seat {seat + 1}"
+    return f"Rower {seat + 1}"
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +456,7 @@ def _draw_crew_timing_page(fig, strokes):
     fig.text(0.5, 0.97, "Crew Timing Sync — Drive Start Offset",
              fontsize=16, fontweight="bold", ha="center", family="sans-serif")
     fig.text(0.5, 0.935,
-             "Each seat's Drive Start T minus stroke seat (ms)  |  0 = perfectly in sync",
+             "Each rower's Drive Start T minus stroke rower (ms)  |  0 = perfectly in sync",
              fontsize=10, ha="center", color="#555", family="sans-serif")
 
     dead = strokes.get("dead_seats", set())
@@ -1883,9 +1883,8 @@ def _draw_speed_factors_overview(fig, strokes, speed_data):
              fontsize=18, fontweight="bold", ha="center", va="top",
              family="sans-serif", color="#2c3e50")
     rate_r2 = speed_data.get("rate_r2", 0)
-    fig.text(0.5, 0.94,
-             "Rate-adjusted: technique factors that predict speed beyond stroke rate  "
-             f"(rate R\u00b2 = {rate_r2:.2f}, "
+    fig.text(0.5, 0.91,
+             f"(rate-only R\u00b2 = {rate_r2:.2f}, "
              f"technique R\u00b2 = {speed_data['model_score']:.2f}, "
              f"n = {speed_data['n_samples']})",
              fontsize=10, ha="center", color="#555", family="sans-serif")
@@ -2035,8 +2034,6 @@ def generate_pdf(strokes, output_path, session_name):
         extra_pages = [
             ("Min Angle (deg)", strokes["MinAngle"], False),
             ("Max Angle (deg)", strokes["MaxAngle"], True),
-            ("Drive Time (s)", strokes["Drive Time"], False),
-            ("Recovery Time (s)", strokes["Recovery Time"], False),
         ]
 
         for title, data, hib in extra_pages:
@@ -2076,33 +2073,6 @@ def generate_pdf(strokes, output_path, session_name):
         pdf.savefig(fig)
         plt.close(fig)
         print(f"  Page {page_num}: Drive:Recovery Ratio")
-        page_num += 1
-
-        # Composite Consistency Score
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_consistency_page(fig, strokes, overall_length, effective_length)
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: Composite Consistency Score")
-        page_num += 1
-
-        # Power Efficiency
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_power_efficiency_page(fig, strokes, effective_length)
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: Power Efficiency")
-        page_num += 1
-
-        # Work Distribution Profile
-        fig = plt.figure(figsize=(16.5, 11.7))
-        fig.patch.set_facecolor("white")
-        _draw_work_distribution_page(fig, strokes)
-        pdf.savefig(fig)
-        plt.close(fig)
-        print(f"  Page {page_num}: Work Distribution Profile")
         page_num += 1
 
         # Rate Response Curves
